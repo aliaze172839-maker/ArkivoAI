@@ -1,0 +1,33 @@
+# ── Python ────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Secrets & Environment ─────────────
+.env
+backend/.env
+*.env.local
+
+# ── Database ──────────────────────────
+*.db
+*.sqlite3
+
+# ── Uploads (user data) ──────────────
+backend/uploads/
+
+# ── IDE ───────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
