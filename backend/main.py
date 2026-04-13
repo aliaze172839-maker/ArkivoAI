@@ -85,13 +85,16 @@ def create_super_admin():
 
     db.close()
 
-app = FastAPI()
+from contextlib import asynccontextmanager
 
-@app.on_event("startup")
-def startup_event():
-    print("🔥 STARTUP WORKING")  # للتأكد
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🔥 STARTUP WORKING")
     Base.metadata.create_all(bind=engine)
     create_super_admin()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 ─────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
