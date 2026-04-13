@@ -132,27 +132,53 @@ def extract_layout_from_pil(pil_image: Image.Image, lang: str = "latin") -> dict
 
 def extract_layout_from_pdf(pdf_path: str, lang: str = "latin") -> dict:
     try:
-        kwargs     = {}
+        kwargs = {}
         if POPPLER_PATH:
             kwargs["poppler_path"] = POPPLER_PATH
+
+        # احسب عدد الصفحات فقط — بدون تحميل أي صورة
         info       = pdfinfo_from_path(pdf_path, **kwargs)
         page_count = info["Pages"]
+
         all_text_parts = []
         pages          = []
+
         for i in range(1, page_count + 1):
-            images    = convert_from_path(pdf_path, dpi=200, first_page=i, last_page=i, **kwargs)
-            page_img  = images[0]
-            page_data = extract_layout_from_pil(page_img, lang=lang)
+            logger.info(f"Processing PDF page {i}/{page_count}")
+
+            # ✅ حوّل صفحة واحدة فقط إلى صورة
+            pil_pages = convert_from_path(
+                pdf_path,
+                dpi=200,
+                first_page=i,
+                last_page=i,
+                **kwargs
+            )
+            pil_img = pil_pages[0]
+
+            # ✅ شغّل OCR عليها بنفس طريقة الصور العادية
+            page_data = extract_layout_from_pil(pil_img, lang=lang)
+
             all_text_parts.append(f"--- Page {i} ---\n{page_data['text']}")
             pages.append({
-                "page": i, "text": page_data["text"],
-                "blocks": page_data["blocks"],
-                "image_width": page_data["image_width"],
+                "page":         i,
+                "text":         page_data["text"],
+                "blocks":       page_data["blocks"],
+                "image_width":  page_data["image_width"],
                 "image_height": page_data["image_height"],
             })
-            del images, page_img, page_data
+
+            # ✅ احذف الصورة من الذاكرة فوراً
+            pil_img.close()
+            del pil_pages, pil_img, page_data
             gc.collect()
-        return {"text": "\n\n".join(all_text_parts), "page_count": page_count, "pages": pages}
+
+        return {
+            "text":       "\n\n".join(all_text_parts),
+            "page_count": page_count,
+            "pages":      pages,
+        }
+
     except Exception as e:
         logger.error(f"OCR failed for PDF {pdf_path}: {e}")
         raise
