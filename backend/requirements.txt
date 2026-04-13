@@ -18,4 +18,3 @@ python-dotenv>=1.0.0
 slowapi>=0.1.9
 psycopg2-binary
 pypdf
-easyocr
