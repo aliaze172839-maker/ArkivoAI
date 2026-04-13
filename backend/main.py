@@ -1164,3 +1164,7 @@ def export_custom_documents(
     if payload.format == "csv":
         return _stream_csv(rows, EXPORT_HEADERS, "custom_export.csv")
     return _stream_excel(rows, EXPORT_HEADERS, "custom_export.xlsx", "Documents")
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1)
