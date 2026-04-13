@@ -9,6 +9,7 @@ Returns two data formats:
 """
 
 import os
+import platform
 import json
 import logging
 from typing import Optional
@@ -26,7 +27,6 @@ logger = logging.getLogger(__name__)
 # 'latin' covers: English, Albanian, Serbian (Latin script), and most European
 # use_angle_cls=True → detects rotated text
 
-# Cache engines by language to avoid reloading
 _engines = {}
 
 def _get_engine(lang: str = "latin"):
@@ -40,10 +40,15 @@ def _get_engine(lang: str = "latin"):
 _get_engine("latin")
 
 # ── Poppler (PDF→image) ─────────────────────────────────────────────────────
-POPPLER_PATH = os.environ.get(
-    "POPPLER_PATH",
-    r"E:\fiverocr\poppler\poppler-24.07.0\Library\bin"
-)
+# Windows: use POPPLER_PATH env or local Windows path
+# Linux/Railway: poppler-utils installs binaries in /usr/bin
+if platform.system() == "Windows":
+    POPPLER_PATH = os.environ.get(
+        "POPPLER_PATH",
+        r"E:\fiverocr\poppler\poppler-24.07.0\Library\bin"
+    )
+else:
+    POPPLER_PATH = os.environ.get("POPPLER_PATH", "/usr/bin")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -80,11 +85,11 @@ def _parse_ocr_result(result):
 
     blocks = []
     for line_info in result[0]:
-        box = line_info[0]           # [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-        text = line_info[1][0]       # recognized text
-        confidence = line_info[1][1] # confidence score
+        box = line_info[0]
+        text = line_info[1][0]
+        confidence = line_info[1][1]
 
-        if confidence < 0.3:         # skip very low confidence noise
+        if confidence < 0.3:
             continue
 
         rect = _polygon_to_rect(box)
@@ -94,7 +99,6 @@ def _parse_ocr_result(result):
             **rect,
         })
 
-    # Sort in reading order: group into rows (similar Y), then left-to-right
     if blocks:
         blocks = _reading_order_sort(blocks)
 
@@ -111,7 +115,6 @@ def _reading_order_sort(blocks, row_threshold=15):
     if not blocks:
         return blocks
 
-    # Sort by Y first
     sorted_by_y = sorted(blocks, key=lambda b: b["y"])
 
     rows = []
@@ -127,7 +130,6 @@ def _reading_order_sort(blocks, row_threshold=15):
             current_y = block["y"]
     rows.append(current_row)
 
-    # Sort each row left-to-right, then flatten
     result = []
     for row in rows:
         row.sort(key=lambda b: b["x"])
@@ -147,7 +149,6 @@ def extract_layout_from_image(image_path: str, lang: str = "latin") -> dict:
     try:
         engine = _get_engine(lang)
 
-        # Get image dimensions
         with Image.open(image_path) as img:
             img_w, img_h = img.size
 
@@ -284,4 +285,3 @@ def process_document_with_layout(file_path: str, file_type: str, lang: str = "la
 
     else:
         raise ValueError(f"Unsupported file type: {file_type}")
-
