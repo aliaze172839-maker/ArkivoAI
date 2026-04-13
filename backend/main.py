@@ -85,14 +85,11 @@ def create_super_admin():
 
     db.close()
 
-
-# ⚠️ لا تكرر app مرتين!
-# احذف هذا إذا كان لديك app معرف سابقاً
-# app = FastAPI()
-
+app = FastAPI()
 
 @app.on_event("startup")
 def startup_event():
+    print("🔥 STARTUP WORKING")  # للتأكد
     Base.metadata.create_all(bind=engine)
     create_super_admin()
 
