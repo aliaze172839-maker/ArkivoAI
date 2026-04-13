@@ -107,8 +107,7 @@ if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
-from admin_routes import admin_router, org_router
-app.include_router(admin_router)
+from backend.admin_routes import admin_router, org_routerapp.include_router(admin_router)
 app.include_router(org_router)
 
 @app.get("/", include_in_schema=False)
