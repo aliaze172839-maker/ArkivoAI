@@ -2,6 +2,6 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "bash -c 'cd backend && python main.py'"
+startCommand = "bash -c 'PYTHONPATH=/app python /app/backend/main.py'"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
