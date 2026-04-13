@@ -846,44 +846,45 @@ def update_document_layout(doc_id: int, payload: LayoutUpdate, db: Session = Dep
 
 
 @app.post("/api/documents/{doc_id}/extract")
-def extract_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+def extractdocument(doc_id: int, db: Session = Depends(get_db), currentuser: User = Depends(get_current_user)):
+    import gc
+    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == currentuser.organization_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-
     if not doc.extracted_text or doc.status != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail="Document has no extracted text. Ensure OCR completed successfully.",
-        )
+        raise HTTPException(status_code=400, detail="Document has no extracted text.")
 
     layout_blocks = None
     try:
         pages = json.loads(doc.ocr_layout_data or "[]")
         if pages:
-            # ✅ FIX: handle single-page dict stored instead of list
-            if isinstance(pages, dict):
-                pages = [pages]
-            if isinstance(pages, list):
-                layout_blocks = []
-                for page in pages:
-                    if isinstance(page, dict):  # skip string keys if any corruption
-                        layout_blocks.extend(page.get("blocks", []))
-    except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
+            layout_blocks = []
+            for page in pages:
+                layout_blocks.extend(page.get("blocks", []))
+            # ✅ حد أقصى 200 block — يمنع JSON ضخم يأكل الذاكرة
+            layout_blocks = layout_blocks[:200]
+    except (json.JSONDecodeError, TypeError):
         pass
 
+    # ✅ حد أقصى 6000 حرف للنص — كافٍ لـ GPT-4o-mini ويوفر ذاكرة
+    text_to_extract = (doc.extracted_text or "")[:6000]
+
     try:
-        result = extract_document_data(doc.extracted_text, layout_blocks)
+        result = extract_document_data(text_to_extract, layout_blocks)
     except Exception as e:
         logger.error(f"Extraction failed for doc {doc_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Extraction failed: {e}")
+    finally:
+        # ✅ تحرير الذاكرة دائماً حتى في حالة الخطأ
+        del layout_blocks
+        gc.collect()
 
     doc.doc_type = result.get("type", "other")
     doc.extracted_metadata = json.dumps(result, ensure_ascii=False)
     db.commit()
     db.refresh(doc)
+    return {"doc_id": doc_id, "result": result}
 
-    return {"doc_id": doc_id, **result}
 
 
 @app.get("/api/documents/{doc_id}/extract")
