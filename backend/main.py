@@ -47,6 +47,8 @@ from backend.security import (
     validate_name,
 )
 from backend.database import engine, get_db, Base, SessionLocal  # ✅ أضف SessionLocal
+from backend.database import SessionLocal
+import os
 
 def create_super_admin():
     db = SessionLocal()
@@ -59,15 +61,16 @@ def create_super_admin():
         db.commit()
         db.refresh(org)
 
+    # ✅ استخدم ENV مرة واحدة
+    admin_password = os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")
+
     # Create or update super admin
     user = db.query(User).filter(User.email == "adminA@arkivo.com").first()
     if not user:
         user = User(
             name="adminA",
             email="adminA@arkivo.com",
-            hashed_password=get_password_hash(
-                os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")  # ✅ أفضل
-            ),
+            hashed_password=get_password_hash(admin_password),
             role="super_admin",
             organization_id=org.id
         )
@@ -76,23 +79,24 @@ def create_super_admin():
         print("✅ Super Admin created")
     else:
         user.role = "super_admin"
-        user.hashed_password = get_password_hash(
-            os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")  # ✅ أفضل
-        )
+        user.hashed_password = get_password_hash(admin_password)
         db.commit()
         print("♻️ Super Admin updated")
 
     db.close()
 
 
-# ✅ الأفضل تشغيلها عند startup بدل import مباشر
-app = FastAPI()
+# ⚠️ لا تكرر app مرتين!
+# احذف هذا إذا كان لديك app معرف سابقاً
+# app = FastAPI()
+
 
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
     create_super_admin()
-# ── Setup ────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
