@@ -12,7 +12,7 @@ import datetime
 import re
 from sqlalchemy.orm import Session
 from backend.models import Document
-from backend.config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_UR
+from backend.config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL 
 
 logger = logging.getLogger(__name__)
 
