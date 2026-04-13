@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["poppler_utils", "python311"]
+
+[phases.install]
+cmds = ["pip install -r backend/requirements.txt"]
+
+[start]
+cmd = "PYTHONPATH=/app python /app/backend/main.py"
