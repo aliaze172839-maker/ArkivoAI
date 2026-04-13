@@ -49,7 +49,10 @@ from backend.security import (
 from backend.database import engine, get_db, Base, SessionLocal  # ✅ أضف SessionLocal
 from backend.database import SessionLocal
 import os
-
+from backend.admin_routes import admin_router, org_router
+app.include_router(org_router)       # ✅ هذا مضاف
+# ❌ admin_router غير مضاف! أضفه:
+app.include_router(admin_router)
 def create_super_admin():
     db = SessionLocal()
 
@@ -87,14 +90,14 @@ def create_super_admin():
 
 from contextlib import asynccontextmanager
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🔥 STARTUP WORKING")
-    Base.metadata.create_all(bind=engine)
-    create_super_admin()
-    yield
-
-app = FastAPI(lifespan=lifespan)
+# ✅ تعريف واحد صحيح
+app = FastAPI(
+    title="Arkivo — AI Document Management System",
+    version="2.0.0",
+    lifespan=lifespan,  # ← هذا هو المهم
+    docs_url=None if os.environ.get("PRODUCTION") else "/docs",
+    redoc_url=None if os.environ.get("PRODUCTION") else "/redoc",
+)
 
 # -------------------------------------------
 logging.basicConfig(level=logging.INFO)
