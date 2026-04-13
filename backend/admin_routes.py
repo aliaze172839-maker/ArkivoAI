@@ -3,9 +3,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Dict, Any
 
-from database import get_db
-from models import User, Organization, Document
-from auth import require_admin, require_super_admin, get_password_hash
+from backend.database import get_db
+from backend.models import User, Organization, Document
+from backend.auth import require_admin, require_super_admin, get_password_hash
 from pydantic import BaseModel, EmailStr, Field
 
 # Router for Super Admin endpoints (Global)
