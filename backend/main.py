@@ -262,7 +262,9 @@ class SettingsUpdate(BaseModel):
 @app.get("/api/settings")
 def get_settings(current_user: User = Depends(get_current_user)):
     """Return current server settings with masked API key."""
-    from config import mask_api_key, get_env_value
+    from backend.config import mask_api_key, get_env_value
+
+
     current_key = get_env_value("OPENROUTER_API_KEY", "")
     current_model = get_env_value("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     return {
