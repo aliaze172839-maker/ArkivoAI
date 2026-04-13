@@ -1,183 +1,225 @@
-"""
-OCR Service — معالجة متتالية صفحة بصفحة لتوفير الذاكرة
-"""
-import os, gc, platform, logging
-from paddleocr import PaddleOCR
-from pdf2image import convert_from_path, pdfinfo_from_path
+import os
+import io
+import logging
 import numpy as np
-from PIL import Image
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ══ محرك OCR واحد فقط في الذاكرة طوال عمر السيرفر ══
-_engine = None
+# ── OCR Engine: PaddleOCR (primary) ──────────────────────────────────────────
+_paddle_ocr = None
 
-def _get_engine():
-    global _engine
-    if _engine is None:
-        logger.info("Loading PaddleOCR engine...")
-        _engine = PaddleOCR(
-            use_angle_cls=False,
-            use_gpu=False,
-            lang='latin',
-            show_log=False,
-            enable_mkldnn=False
-        )
-        logger.info("PaddleOCR engine ready.")
-    return _engine
+def _get_paddle(lang: str = "latin"):
+    global _paddle_ocr
+    if _paddle_ocr is None:
+        try:
+            from paddleocr import PaddleOCR
+            _paddle_ocr = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
+            logger.info(f"PaddleOCR loaded (lang={lang})")
+        except Exception as e:
+            logger.warning(f"PaddleOCR unavailable: {e}")
+            _paddle_ocr = False
+    return _paddle_ocr if _paddle_ocr is not False else None
 
-# تحميل مسبق عند بدء السيرفر
-_get_engine()
 
-# ── Poppler ──────────────────────────────────────────
-if platform.system() == "Windows":
-    POPPLER_PATH = os.environ.get("POPPLER_PATH", r"E:\\fiverocr\\poppler\\poppler-24.07.0\\Library\\bin")
-else:
-    POPPLER_PATH = os.environ.get("POPPLER_PATH", "/usr/bin")
+# ── PDF → PIL Image using PyMuPDF (no poppler needed) ────────────────────────
+def _pdf_page_to_pil(filepath: str, page_num: int, dpi: int = 150):
+    """
+    Renders a single PDF page to a PIL Image using fitz (pymupdf).
+    page_num is 0-indexed.
+    """
+    import fitz  # pymupdf
+    from PIL import Image
 
-# ══ Helpers ══════════════════════════════════════════
+    doc = fitz.open(filepath)
+    if page_num >= len(doc):
+        raise ValueError(f"Page {page_num} out of range (doc has {len(doc)} pages)")
 
-def _polygon_to_rect(box):
-    xs = [pt[0] for pt in box]
-    ys = [pt[1] for pt in box]
-    x, y = min(xs), min(ys)
-    return {"x": round(x,1), "y": round(y,1),
-            "width": round(max(xs)-x,1), "height": round(max(ys)-y,1)}
+    mat = fitz.Matrix(dpi / 72, dpi / 72)
+    pix = doc[page_num].get_pixmap(matrix=mat, alpha=False)
+    img_bytes = pix.tobytes("png")
+    doc.close()
 
-def _parse_result(result):
-    if not result or not result[0]:
-        return []
+    return Image.open(io.BytesIO(img_bytes))
+
+
+def _get_pdf_page_count(filepath: str) -> int:
+    import fitz
+    doc = fitz.open(filepath)
+    count = len(doc)
+    doc.close()
+    return count
+
+
+# ── Core OCR on a PIL image ───────────────────────────────────────────────────
+def _ocr_pil_image(pil_img, lang: str = "latin"):
+    """
+    Run OCR on a PIL Image.
+    Returns list of blocks: [{text, x, y, width, height, confidence}]
+    """
+    img_np = np.array(pil_img.convert("RGB"))
+    img_w, img_h = pil_img.size
     blocks = []
-    for line in result[0]:
-        text, conf = line[1][0], line[1][1]
-        if conf < 0.3:
-            continue
-        blocks.append({"text": text, "confidence": round(conf,3), **_polygon_to_rect(line[0])})
-    return _sort_blocks(blocks)
 
-def _sort_blocks(blocks, row_threshold=15):
-    if not blocks:
-        return blocks
-    sorted_y = sorted(blocks, key=lambda b: b["y"])
-    rows, cur_row, cur_y = [], [sorted_y[0]], sorted_y[0]["y"]
-    for b in sorted_y[1:]:
-        if abs(b["y"] - cur_y) < row_threshold:
-            cur_row.append(b)
-        else:
-            rows.append(cur_row)
-            cur_row, cur_y = [b], b["y"]
-    rows.append(cur_row)
-    result = []
-    for row in rows:
-        result.extend(sorted(row, key=lambda b: b["x"]))
-    return result
+    # Try PaddleOCR first
+    paddle = _get_paddle(lang)
+    if paddle:
+        try:
+            result = paddle.ocr(img_np, cls=True)
+            if result and result[0]:
+                for line in result[0]:
+                    if not line:
+                        continue
+                    box, (text, conf) = line
+                    xs = [p[0] for p in box]
+                    ys = [p[1] for p in box]
+                    x, y = min(xs), min(ys)
+                    w, h = max(xs) - x, max(ys) - y
+                    blocks.append({
+                        "text": text,
+                        "x": round(float(x), 2),
+                        "y": round(float(y), 2),
+                        "width": round(float(w), 2),
+                        "height": round(float(h), 2),
+                        "confidence": round(float(conf), 4),
+                    })
+            return blocks, img_w, img_h
+        except Exception as e:
+            logger.warning(f"PaddleOCR failed, falling back to EasyOCR: {e}")
 
-# ══ دالة OCR الأساسية — تعمل على PIL Image مباشرة ════
+    # Fallback: EasyOCR
+    try:
+        import easyocr
+        lang_map = {
+            "latin": ["en"],
+            "ar": ["ar", "en"],
+            "ch": ["ch_sim", "en"],
+            "fr": ["fr", "en"],
+            "de": ["de", "en"],
+        }
+        easyocr_langs = lang_map.get(lang, ["en"])
+        reader = easyocr.Reader(easyocr_langs, gpu=False)
+        result = reader.readtext(img_np)
+        for (box, text, conf) in result:
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            x, y = min(xs), min(ys)
+            w, h = max(xs) - x, max(ys) - y
+            blocks.append({
+                "text": text,
+                "x": round(float(x), 2),
+                "y": round(float(y), 2),
+                "width": round(float(w), 2),
+                "height": round(float(h), 2),
+                "confidence": round(float(conf), 4),
+            })
+        return blocks, img_w, img_h
+    except Exception as e:
+        logger.error(f"EasyOCR also failed: {e}")
 
-def _ocr_pil(pil_image: Image.Image) -> dict:
+    return [], img_w, img_h
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def process_document(filepath: str, filetype: str, lang: str = "latin") -> str:
     """
-    ✅ الدالة الوحيدة التي تُشغّل OCR — تعمل على صورة واحدة فقط
-    سواء كانت JPG أصلية أو صفحة محوّلة من PDF
+    Simple OCR — returns plain extracted text (no layout data).
+    Used by older callers; internally calls process_document_with_layout.
     """
-    engine = _get_engine()
-    img_w, img_h = pil_image.size
-    img_array = np.array(pil_image)
+    result = process_document_with_layout(filepath, filetype, lang)
+    return result.get("text", "")
 
-    result = engine.ocr(img_array, cls=False)
-    blocks = _parse_result(result)
-    full_text = "\n".join(b["text"] for b in blocks if b["confidence"] > 0.5)
 
-    del img_array, result
-    gc.collect()
+def process_document_with_layout(filepath: str, filetype: str, lang: str = "latin") -> dict:
+    """
+    Full OCR with layout information.
 
+    Returns:
+    {
+        "text": str,            # full concatenated text
+        "page_count": int,
+        "pages": [
+            {
+                "page": int,        # 1-indexed
+                "text": str,
+                "image_width": int,
+                "image_height": int,
+                "blocks": [
+                    {
+                        "text": str,
+                        "x": float, "y": float,
+                        "width": float, "height": float,
+                        "confidence": float
+                    }
+                ]
+            }
+        ]
+    }
+    """
+    ext = filetype.lower().lstrip(".")
+    pages_data = []
+
+    # ── PDF ───────────────────────────────────────────────────────────────────
+    if ext == "pdf":
+        try:
+            page_count = _get_pdf_page_count(filepath)
+        except Exception as e:
+            logger.error(f"Cannot open PDF {filepath}: {e}")
+            return {"text": "", "page_count": 0, "pages": []}
+
+        for page_idx in range(page_count):
+            try:
+                pil_img = _pdf_page_to_pil(filepath, page_idx, dpi=150)
+                blocks, img_w, img_h = _ocr_pil_image(pil_img, lang)
+                page_text = "\n".join(b["text"] for b in blocks)
+                pages_data.append({
+                    "page": page_idx + 1,
+                    "text": page_text,
+                    "image_width": img_w,
+                    "image_height": img_h,
+                    "blocks": blocks,
+                })
+            except Exception as e:
+                logger.error(f"OCR failed on page {page_idx + 1} of {filepath}: {e}")
+                pages_data.append({
+                    "page": page_idx + 1,
+                    "text": "",
+                    "image_width": 0,
+                    "image_height": 0,
+                    "blocks": [],
+                })
+
+    # ── Image (JPG / PNG / JPEG) ───────────────────────────────────────────────
+    elif ext in ("jpg", "jpeg", "png"):
+        try:
+            from PIL import Image
+            pil_img = Image.open(filepath)
+            blocks, img_w, img_h = _ocr_pil_image(pil_img, lang)
+            page_text = "\n".join(b["text"] for b in blocks)
+            pages_data.append({
+                "page": 1,
+                "text": page_text,
+                "image_width": img_w,
+                "image_height": img_h,
+                "blocks": blocks,
+            })
+        except Exception as e:
+            logger.error(f"OCR failed on image {filepath}: {e}")
+            pages_data.append({
+                "page": 1,
+                "text": "",
+                "image_width": 0,
+                "image_height": 0,
+                "blocks": [],
+            })
+    else:
+        logger.warning(f"Unsupported filetype for OCR: {ext}")
+        return {"text": "", "page_count": 0, "pages": []}
+
+    full_text = "\n\n".join(p["text"] for p in pages_data if p["text"])
     return {
         "text": full_text,
-        "blocks": blocks,
-        "image_width": img_w,
-        "image_height": img_h
+        "page_count": len(pages_data),
+        "pages": pages_data,
     }
-
-# ══ Entry Points العامة ═══════════════════════════════
-
-def extract_layout_from_image(image_path: str, lang: str = "latin") -> dict:
-    """صورة JPG/PNG — افتحها وشغّل OCR مباشرة"""
-    with Image.open(image_path) as img:
-        img_copy = img.copy()  # نسخ لأن Image.open lazy
-    result = _ocr_pil(img_copy)
-    img_copy.close()
-    return result
-
-def extract_layout_from_pdf(pdf_path: str, lang: str = "latin") -> dict:
-    """
-    ✅ PDF — حوّل كل صفحة إلى صورة ثم شغّل OCR عليها كصورة عادية
-    الذاكرة ثابتة = صورة واحدة فقط في الوقت الواحد
-    """
-    kwargs = {}
-    if POPPLER_PATH:
-        kwargs["poppler_path"] = POPPLER_PATH
-
-    info = pdfinfo_from_path(pdf_path, **kwargs)
-    page_count = info["Pages"]
-
-    all_text_parts, pages = [], []
-
-    for i in range(1, page_count + 1):
-        logger.info(f"OCR: PDF page {i}/{page_count}")
-
-        # ✅ صفحة واحدة فقط → صورة → OCR → احذف من الذاكرة
-        pil_pages = convert_from_path(
-            pdf_path, dpi=200,
-            first_page=i, last_page=i,
-            **kwargs
-        )
-        pil_img = pil_pages[0]
-        page_data = _ocr_pil(pil_img)   # ← نفس الدالة المستخدمة للصور!
-
-        all_text_parts.append(f"--- Page {i} ---\n{page_data['text']}")
-        pages.append({
-            "page": i,
-            "text": page_data["text"],
-            "blocks": page_data["blocks"],
-            "image_width": page_data["image_width"],
-            "image_height": page_data["image_height"],
-        })
-
-        # ✅ تحرير فوري من الذاكرة
-        pil_img.close()
-        del pil_pages, pil_img, page_data
-        gc.collect()
-
-    return {
-        "text": "\n\n".join(all_text_parts),
-        "page_count": page_count,
-        "pages": pages
-    }
-
-# ══ دوال Backward-Compatible (main.py يستدعيها) ══════
-
-def process_document(file_path: str, file_type: str, lang: str = "latin") -> tuple[str, int]:
-    file_type = file_type.lower()
-    if file_type in ("jpg","jpeg","png","bmp","tiff"):
-        data = extract_layout_from_image(file_path)
-        return data["text"], 1
-    elif file_type == "pdf":
-        data = extract_layout_from_pdf(file_path)
-        return data["text"], data["page_count"]
-    else:
-        raise ValueError(f"Unsupported file type: {file_type}")
-
-def process_document_with_layout(file_path: str, file_type: str, lang: str = "latin") -> dict:
-    file_type = file_type.lower()
-    if file_type in ("jpg","jpeg","png","bmp","tiff"):
-        data = extract_layout_from_image(file_path)
-        return {"text": data["text"], "page_count": 1, "pages": [{
-            "page":1, "text": data["text"], "blocks": data["blocks"],
-            "image_width": data["image_width"], "image_height": data["image_height"]
-        }]}
-    elif file_type == "pdf":
-        return extract_layout_from_pdf(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_type}")
-
-# للتوافق مع أي كود قديم يستدعي extract_layout_from_pil
-extract_layout_from_pil = lambda pil_img, lang="latin": _ocr_pil(pil_img)
