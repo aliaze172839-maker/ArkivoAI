@@ -276,8 +276,8 @@ def get_settings(current_user: User = Depends(get_current_user)):
 @app.put("/api/settings")
 def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_current_user)):
     """Update server settings — writes to .env and updates live config."""
-    from config import update_env_value, mask_api_key
-    import config as cfg
+    from backend.config import mask_api_key, get_env_value
+    import backend.config as cfg
 
     # Only admins or super_admins can change server settings
     if current_user.role not in ("admin", "super_admin"):
