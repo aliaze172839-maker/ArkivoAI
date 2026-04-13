@@ -15,6 +15,7 @@ import uuid
 import json
 import csv
 import io
+import gc                          # ✅ FIX-1: memory cleanup
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -30,9 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
-# ── Secure Configuration ─────────────────────────────────────────────────────
 from backend import config
-
 from backend.database import engine, get_db, Base, SessionLocal
 from backend.models import Document, User, Organization
 from backend.auth import get_current_user, create_access_token, verify_password, get_password_hash
@@ -49,15 +48,35 @@ from backend.security import (
 )
 from backend.admin_routes import admin_router, org_router
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Super Admin Setup ─────────────────────────────────────────────────────────
+
+# ── ✅ FIX-2: update_env_value مفقودة كلياً من الكود الأصلي ──────────────────
+def update_env_value(key: str, value: str):
+    """Write/update a key=value line in .env and set it in os.environ."""
+    env_path = Path(".env")
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        new_lines, updated = [], False
+        for line in lines:
+            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
+                new_lines.append(f"{key}={value}")
+                updated = True
+            else:
+                new_lines.append(line)
+        if not updated:
+            new_lines.append(f"{key}={value}")
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write(f"{key}={value}\n")
+    os.environ[key] = value
+
+
 def create_super_admin():
     db = SessionLocal()
     try:
-        # Create or get organization
         org = db.query(Organization).filter(Organization.name == "Arkivo Core").first()
         if not org:
             org = Organization(name="Arkivo Core", invite_code="ARKIVO-CORE")
@@ -67,7 +86,6 @@ def create_super_admin():
 
         admin_password = os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")
 
-        # Create or update super admin
         user = db.query(User).filter(User.email == "adminA@arkivo.com").first()
         if not user:
             user = User(
@@ -88,7 +106,7 @@ def create_super_admin():
     finally:
         db.close()
 
-# ── Lifespan ──────────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🔥 STARTUP WORKING")
@@ -96,7 +114,7 @@ async def lifespan(app: FastAPI):
     create_super_admin()
     yield
 
-# ── ✅ App — تعريف واحد فقط مع lifespan ──────────────────────────────────────
+
 app = FastAPI(
     title="Arkivo — AI Document Management System",
     version="2.0.0",
@@ -105,15 +123,12 @@ app = FastAPI(
     redoc_url=None if os.environ.get("PRODUCTION") else "/redoc",
 )
 
-# ── Config ────────────────────────────────────────────────────────────────────
 UPLOAD_DIR = config.UPLOAD_DIR
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXTENSIONS = config.ALLOWED_EXTENSIONS
 MAX_FILE_SIZE = config.MAX_FILE_SIZE
 
-# ── Security Middleware ───────────────────────────────────────────────────────
 app.add_middleware(SecurityHeadersMiddleware)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
@@ -122,7 +137,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# ── Rate Limiting ─────────────────────────────────────────────────────────────
 try:
     from slowapi import Limiter, _rate_limit_exceeded_handler
     from slowapi.util import get_remote_address
@@ -144,29 +158,26 @@ except ImportError:
             return decorator
     limiter = _NoOpLimiter()
 
-# ── Static Files ──────────────────────────────────────────────────────────────
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
-# ── ✅ Routers — بعد تعريف app مباشرة ────────────────────────────────────────
 app.include_router(org_router)
 app.include_router(admin_router)
 
-# ── Root Redirect ─────────────────────────────────────────────────────────────
+
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/static/index.html")
 
 
-
-
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=200)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    action: str = Field(..., pattern="^(create|join)$")  # Strict validation
+    action: str = Field(..., pattern="^(create|join)$")
     org_name: str = Field(None, min_length=2, max_length=200)
     invite_code: str = Field(None, max_length=50)
 
@@ -180,12 +191,10 @@ def generate_invite_code():
 @app.post("/api/auth/register")
 @limiter.limit(config.RATE_LIMIT_AUTH)
 def register(request: Request, payload: RegisterRequest, db: Session = Depends(get_db)):
-    # Validate password strength
     pw_valid, pw_error = validate_password_strength(payload.password)
     if not pw_valid:
         raise HTTPException(status_code=400, detail=pw_error)
 
-    # Validate name
     name_valid, name_error = validate_name(payload.name)
     if not name_valid:
         raise HTTPException(status_code=400, detail=name_error)
@@ -193,7 +202,7 @@ def register(request: Request, payload: RegisterRequest, db: Session = Depends(g
     user = db.query(User).filter(User.email == payload.email).first()
     if user:
         raise HTTPException(status_code=400, detail="Email already registered")
-        
+
     if payload.action == 'create':
         if not payload.org_name:
             raise HTTPException(status_code=400, detail="Organization name is required")
@@ -225,21 +234,20 @@ def register(request: Request, payload: RegisterRequest, db: Session = Depends(g
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-    
     return {"message": "User created successfully"}
+
 
 @app.post("/api/auth/login")
 @limiter.limit(config.RATE_LIMIT_AUTH)
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
-    # Generic error message to prevent user enumeration
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
-        
     access_token = create_access_token(
         data={"sub": str(user.id), "org_id": user.organization_id, "role": user.role}
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
 
 @app.get("/api/auth/me")
 def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -253,18 +261,16 @@ def get_me(current_user: User = Depends(get_current_user), db: Session = Depends
     }
 
 
-# ── Settings API ─────────────────────────────────────────────────────────────
+# ── Settings ──────────────────────────────────────────────────────────────────
 
 class SettingsUpdate(BaseModel):
     api_key: str = Field(None, max_length=200)
     model: str = Field(None, max_length=100)
 
+
 @app.get("/api/settings")
 def get_settings(current_user: User = Depends(get_current_user)):
-    """Return current server settings with masked API key."""
     from backend.config import mask_api_key, get_env_value
-
-
     current_key = get_env_value("OPENROUTER_API_KEY", "")
     current_model = get_env_value("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     return {
@@ -273,13 +279,12 @@ def get_settings(current_user: User = Depends(get_current_user)):
         "model": current_model,
     }
 
+
 @app.put("/api/settings")
 def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_current_user)):
-    """Update server settings — writes to .env and updates live config."""
     from backend.config import mask_api_key, get_env_value
     import backend.config as cfg
 
-    # Only admins or super_admins can change server settings
     if current_user.role not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can change settings")
 
@@ -288,8 +293,7 @@ def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_cu
     if payload.api_key is not None:
         new_key = payload.api_key.strip()
         if new_key:
-            update_env_value("OPENROUTER_API_KEY", new_key)
-            # Update the live module-level variable so all services use the new key immediately
+            update_env_value("OPENROUTER_API_KEY", new_key)   # ✅ now defined above
             cfg.OPENROUTER_API_KEY = new_key
             updated.append("api_key")
             logger.info("OPENROUTER_API_KEY updated by admin user %s", current_user.id)
@@ -297,7 +301,7 @@ def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_cu
     if payload.model is not None:
         new_model = payload.model.strip()
         if new_model:
-            update_env_value("OPENROUTER_MODEL", new_model)
+            update_env_value("OPENROUTER_MODEL", new_model)   # ✅ now defined above
             cfg.OPENROUTER_MODEL = new_model
             updated.append("model")
 
@@ -312,13 +316,15 @@ def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_cu
     }
 
 
+# ── Documents ─────────────────────────────────────────────────────────────────
+
 @app.post("/api/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
     lang: str = Query(default="latin", pattern="^[a-z]{2,10}$"),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    # ── Security: Validate extension ─────────────────────────────────────
     safe_filename = sanitize_filename(file.filename)
     ext = safe_filename.rsplit(".", 1)[-1].lower() if "." in safe_filename else ""
     if ext not in ALLOWED_EXTENSIONS:
@@ -330,22 +336,17 @@ async def upload_document(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail=f"File size exceeds {config.MAX_FILE_SIZE_MB} MB limit.")
-
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="Empty file uploaded.")
 
-    # ── Security: Validate file magic bytes ──────────────────────────────
     if not validate_file_magic(content, ext):
         raise HTTPException(
             status_code=400,
             detail="File content does not match declared file type. Upload rejected.",
         )
 
-    # ── Security: Use UUID filename to prevent path traversal ────────────
     stored_filename = f"{uuid.uuid4().hex}.{ext}"
     file_path = os.path.join(UPLOAD_DIR, stored_filename)
-
-    # Double-check resolved path stays within UPLOAD_DIR (prevents traversal)
     resolved = os.path.realpath(file_path)
     if not resolved.startswith(os.path.realpath(UPLOAD_DIR)):
         raise HTTPException(status_code=400, detail="Invalid file path.")
@@ -368,15 +369,14 @@ async def upload_document(
     try:
         from fastapi.concurrency import run_in_threadpool
         layout_result = await run_in_threadpool(process_document_with_layout, file_path, ext, lang)
-        
+
         doc.extracted_text = layout_result["text"]
         doc.page_count = layout_result["page_count"]
         doc.status = "completed"
-        
+
         if ext == "pdf" and layout_result["page_count"] > 1:
             doc.file_type = "folder"
-            doc.ocr_layout_data = "[]" 
-            
+            doc.ocr_layout_data = "[]"
             for page_data in layout_result.get("pages", []):
                 child_doc = Document(
                     parent_id=doc.id,
@@ -397,7 +397,7 @@ async def upload_document(
         logger.info(f"OCR completed for document {doc.id} — {len(layout_result['text'])} chars")
     except Exception as e:
         doc.status = "failed"
-        doc.error_message = str(e)[:500]  # Limit error message length
+        doc.error_message = str(e)[:500]
         logger.error(f"OCR failed for document {doc.id}: {type(e).__name__}")
 
     db.commit()
@@ -407,7 +407,10 @@ async def upload_document(
 
 @app.get("/api/documents")
 def list_documents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    docs = db.query(Document).filter(Document.parent_id == None, Document.organization_id == current_user.organization_id).order_by(Document.created_at.desc()).all()
+    docs = db.query(Document).filter(
+        Document.parent_id == None,
+        Document.organization_id == current_user.organization_id
+    ).order_by(Document.created_at.desc()).all()
     result = []
     for doc in docs:
         d = doc.to_dict()
@@ -419,9 +422,11 @@ def list_documents(db: Session = Depends(get_db), current_user: User = Depends(g
         result.append(d)
     return result
 
+
 class SearchQuery(BaseModel):
     query: str = None
     filters: dict = None
+
 
 @app.post("/api/documents/search")
 def search_documents(payload: SearchQuery, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -429,28 +434,31 @@ def search_documents(payload: SearchQuery, db: Session = Depends(get_db), curren
         filters = parse_search_query(payload.query)
     else:
         filters = payload.filters or {}
-        
-    docs = db.query(Document).filter(Document.file_type != "folder", Document.organization_id == current_user.organization_id).order_by(Document.created_at.desc()).all()
-    
+
+    docs = db.query(Document).filter(
+        Document.file_type != "folder",
+        Document.organization_id == current_user.organization_id
+    ).order_by(Document.created_at.desc()).all()
+
     result = []
     for doc in docs:
         try:
             meta = json.loads(doc.extracted_metadata or "{}")
         except (json.JSONDecodeError, TypeError):
             meta = {}
-            
+
         match = True
-        
+
         if filters.get("document_type"):
             dtype = filters["document_type"].lower()
             if (doc.doc_type or "").lower() != dtype:
                 match = False
-                
+
         if match and filters.get("company"):
             company_val = meta.get("company", {}).get("value", "") if isinstance(meta.get("company"), dict) else meta.get("company", "")
             if filters["company"].lower() not in (company_val or "").lower():
                 match = False
-                
+
         if match and filters.get("client_name"):
             client_val = meta.get("client_name", {}).get("value", "") if isinstance(meta.get("client_name"), dict) else meta.get("client_name", "")
             if filters["client_name"].lower() not in (client_val or "").lower():
@@ -460,13 +468,12 @@ def search_documents(payload: SearchQuery, db: Session = Depends(get_db), curren
             inv_val = meta.get("invoice_number", {}).get("value", "") if isinstance(meta.get("invoice_number"), dict) else meta.get("invoice_number", "")
             if filters["invoice_number"].lower() not in (inv_val or "").lower():
                 match = False
-                
+
         if match and filters.get("date_range"):
             dr = filters["date_range"]
             if dr:
                 d_from = dr.get("from")
                 d_to = dr.get("to")
-                
                 if d_from or d_to:
                     date_val = meta.get("date", {}).get("value", "") if isinstance(meta.get("date"), dict) else meta.get("date", "")
                     if not date_val:
@@ -476,35 +483,28 @@ def search_documents(payload: SearchQuery, db: Session = Depends(get_db), curren
                         try:
                             clean_v = str(date_val).replace('.', '-').replace('/', '-').strip()
                             parts = [p.strip() for p in clean_v.split('-') if p.strip()]
-                            
                             if len(parts) == 3:
                                 y, m, d = None, None, None
                                 p0, p1, p2 = int(parts[0]), int(parts[1]), int(parts[2])
-                                
-                                # 1. Find the year
-                                if p0 > 1000: y, m, d = p0, p1, p2
-                                elif p2 > 31: 
+                                if p0 > 1000:
+                                    y, m, d = p0, p1, p2
+                                elif p2 > 31:
                                     y = p2
                                     if y < 100: y += 2000
-                                    # Now determine m vs d from p0, p1
                                     if p1 > 12: d, m = p1, p0
                                     elif p0 > 12: d, m = p0, p1
-                                    else: d, m = p0, p1 # Europe default: DD-MM
-                                # 2-digit year fallback or DD-MM-YYYY
+                                    else: d, m = p0, p1
                                 elif p2 > 12:
                                     y = p2 + 2000 if p2 < 100 else p2
                                     d, m = p0, p1
                                 else:
-                                    # Fallback to Europe: DD-MM-YYYY
                                     d, m, y = p0, p1, p2
                                     if y < 100: y += 2000
-                                
                                 if y and m and d:
                                     dt = datetime(y, m, d)
                                     parsed_iso = dt.strftime("%Y-%m-%d")
                         except Exception:
                             pass
-                        
                         if parsed_iso:
                             if d_from and parsed_iso < d_from:
                                 match = False
@@ -527,21 +527,20 @@ def search_documents(payload: SearchQuery, db: Session = Depends(get_db), curren
             if "extracted_text" in d:
                 del d["extracted_text"]
             result.append(d)
-            
+
     return {"filters": filters, "results": result}
 
+
+# ── AI Assistant ──────────────────────────────────────────────────────────────
 
 class AssistantPayload(BaseModel):
     query: str
     language: str = "English"
 
+
 @app.post("/api/ai/chat")
 @limiter.limit(config.RATE_LIMIT_AI)
 def assistant_chat(request: Request, payload: AssistantPayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """
-    Conversational AI Assistant endpoint.
-    SECURITY: Passes organization_id to enforce tenant isolation.
-    """
     try:
         response = get_assistant_response(
             payload.query, db, payload.language,
@@ -553,25 +552,14 @@ def assistant_chat(request: Request, payload: AssistantPayload, db: Session = De
         raise HTTPException(status_code=500, detail="An error occurred processing your AI request.")
 
 
-@app.post("/api/ai/assistant")
-def ai_assistant(payload: SearchQuery, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """
-    Agentic assistant endpoint that returns a conversational message + filtered results.
-    """
-    if not payload.query:
-        raise HTTPException(status_code=400, detail="Query is required for assistant.")
-        
-    try:
-        response = get_conversational_response(payload.query, db)
-        return response
-    except Exception as e:
-        logger.error(f"AI Assistant failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ── Document Operations ───────────────────────────────────────────────────────
 
 @app.get("/api/documents/{doc_id}/children")
 def list_document_children(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    docs = db.query(Document).filter(Document.parent_id == doc_id, Document.organization_id == current_user.organization_id).order_by(Document.id.asc()).all()
+    docs = db.query(Document).filter(
+        Document.parent_id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).order_by(Document.id.asc()).all()
     result = []
     for doc in docs:
         d = doc.to_dict()
@@ -586,7 +574,10 @@ def list_document_children(doc_id: int, db: Session = Depends(get_db), current_u
 
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc.to_dict()
@@ -594,7 +585,10 @@ def get_document(doc_id: int, db: Session = Depends(get_db), current_user: User 
 
 @app.get("/api/documents/{doc_id}/download")
 def download_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -619,26 +613,18 @@ def download_document(doc_id: int, db: Session = Depends(get_db), current_user: 
             layout = json.loads(doc.ocr_layout_data or "[]")
             if layout and isinstance(layout, list) and "page" in layout[0]:
                 page_num = int(layout[0]["page"])
-                
-                import io
                 from pypdf import PdfReader, PdfWriter
-                
                 reader = PdfReader(file_path)
                 writer = PdfWriter()
-                
                 if 0 <= page_num - 1 < len(reader.pages):
                     writer.add_page(reader.pages[page_num - 1])
-                    
                     buf = io.BytesIO()
                     writer.write(buf)
                     buf.seek(0)
-                    
                     return Response(
                         content=buf.read(),
                         media_type="application/pdf",
-                        headers={
-                            "Content-Disposition": f'attachment; filename="{dl_filename}"'
-                        }
+                        headers={"Content-Disposition": f'attachment; filename="{dl_filename}"'}
                     )
         except Exception as e:
             logger.error(f"Failed to extract single PDF page for download Doc ID {doc_id}: {e}")
@@ -647,15 +633,16 @@ def download_document(doc_id: int, db: Session = Depends(get_db), current_user: 
         path=file_path,
         filename=dl_filename,
         media_type=media_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{dl_filename}"'
-        },
+        headers={"Content-Disposition": f'attachment; filename="{dl_filename}"'},
     )
 
 
 @app.get("/api/documents/{doc_id}/preview")
 def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -668,9 +655,7 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
         return FileResponse(path=file_path, media_type=media_types.get(doc.file_type, "application/octet-stream"))
 
     if doc.file_type in ("pdf", "folder"):
-        import io
         from pdf2image import convert_from_path
-
         if doc.parent_id is not None:
             try:
                 layout = json.loads(doc.ocr_layout_data or "[]")
@@ -678,7 +663,6 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
                     page = layout[0].get("page", page)
             except (json.JSONDecodeError, TypeError):
                 pass
-                
         if doc.file_type == "folder":
             page = 1
 
@@ -709,17 +693,16 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
 
 @app.delete("/api/documents/all")
 def delete_all_documents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Delete ALL documents and their files from disk."""
-    # Allow everyone in the organization to delete (admin, super_admin, member)
     if current_user.role not in ("admin", "super_admin", "member"):
         raise HTTPException(status_code=403, detail="Unrecognized user role")
     try:
-        root_docs = db.query(Document).filter(Document.parent_id == None, Document.organization_id == current_user.organization_id).all()
+        root_docs = db.query(Document).filter(
+            Document.parent_id == None,
+            Document.organization_id == current_user.organization_id
+        ).all()
         deleted_files = 0
         for doc in root_docs:
-            # Delete child records
             db.query(Document).filter(Document.parent_id == doc.id).delete()
-            # Delete file from disk
             file_path = os.path.join(UPLOAD_DIR, doc.filename)
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -735,19 +718,21 @@ def delete_all_documents(db: Session = Depends(get_db), current_user: User = Dep
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Allow everyone in the organization to delete (admin, super_admin, member)
     if current_user.role not in ("admin", "super_admin", "member"):
         raise HTTPException(status_code=403, detail="Unrecognized user role")
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
     try:
-        # Delete children if this is a parent document (or folder)
         if doc.parent_id is None:
-            db.query(Document).filter(Document.parent_id == doc_id, Document.organization_id == current_user.organization_id).delete()
-
-        # Delete physical file for root documents
+            db.query(Document).filter(
+                Document.parent_id == doc_id,
+                Document.organization_id == current_user.organization_id
+            ).delete()
         if doc.parent_id is None and doc.file_type != "folder":
             file_path = os.path.join(UPLOAD_DIR, doc.filename)
             if os.path.exists(file_path):
@@ -755,25 +740,26 @@ def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: Us
                     os.remove(file_path)
                 except Exception as e:
                     logger.error(f"File deletion error: {e}")
-                    # We continue even if file deletion fails to clean up DB
-
         db.delete(doc)
         db.commit()
         return {"message": "Document deleted successfully", "id": doc_id}
     except Exception as e:
         db.rollback()
-        error_msg = str(e)
-        logger.error(f"Full deletion error: {error_msg}")
-        raise HTTPException(status_code=500, detail=f"Database error: {error_msg}")
+        logger.error(f"Full deletion error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
 @app.get("/api/documents/{doc_id}/layout")
 def get_document_layout(
     doc_id: int,
     page: int = Query(default=1, ge=1),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -784,7 +770,6 @@ def get_document_layout(
 
     if not pages:
         raise HTTPException(status_code=404, detail="No layout data available. Re-upload to generate.")
-
     if page > len(pages):
         raise HTTPException(status_code=404, detail=f"Page {page} not found. Document has {len(pages)} pages.")
 
@@ -802,15 +787,19 @@ def get_document_layout(
 class TextUpdate(BaseModel):
     extracted_text: str
 
+
 @app.put("/api/documents/{doc_id}/text")
 def update_document_text(doc_id: int, payload: TextUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    
     doc.extracted_text = payload.extracted_text
     db.commit()
     return {"message": "Text updated successfully"}
+
 
 class LayoutBlockUpdate(BaseModel):
     text: str
@@ -820,123 +809,129 @@ class LayoutBlockUpdate(BaseModel):
     height: float
     confidence: float = 1.0
 
+
 class LayoutUpdate(BaseModel):
     page: int
     blocks: List[LayoutBlockUpdate]
 
+
 @app.put("/api/documents/{doc_id}/layout")
 def update_document_layout(doc_id: int, payload: LayoutUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-        
     try:
         pages = json.loads(doc.ocr_layout_data or "[]")
     except Exception:
         pages = []
-        
     while len(pages) < payload.page:
         pages.append({"page": len(pages) + 1, "blocks": []})
-        
     pages[payload.page - 1]["blocks"] = [b.dict() for b in payload.blocks]
-    
     doc.ocr_layout_data = json.dumps(pages, ensure_ascii=False)
     db.commit()
     return {"message": "Layout updated successfully"}
 
 
+# ── ✅ FIX-3: extract_document — text + blocks limits + gc ───────────────────
 @app.post("/api/documents/{doc_id}/extract")
-def extractdocument(doc_id: int, db: Session = Depends(get_db), currentuser: User = Depends(get_current_user)):
-    import gc
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == currentuser.organization_id).first()
+def extract_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
     if not doc.extracted_text or doc.status != "completed":
-        raise HTTPException(status_code=400, detail="Document has no extracted text.")
+        raise HTTPException(
+            status_code=400,
+            detail="Document has no extracted text. Ensure OCR completed successfully.",
+        )
 
     layout_blocks = None
     try:
         pages = json.loads(doc.ocr_layout_data or "[]")
         if pages:
-            layout_blocks = []
-            for page in pages:
-                layout_blocks.extend(page.get("blocks", []))
-            # ✅ حد أقصى 200 block — يمنع JSON ضخم يأكل الذاكرة
-            layout_blocks = layout_blocks[:200]
-    except (json.JSONDecodeError, TypeError):
+            if isinstance(pages, dict):
+                pages = [pages]
+            if isinstance(pages, list):
+                layout_blocks = []
+                for page in pages:
+                    if isinstance(page, dict):
+                        layout_blocks.extend(page.get("blocks", []))
+                # ✅ حد أقصى 200 block — يمنع إرسال JSON ضخم إلى LLM
+                if layout_blocks:
+                    layout_blocks = layout_blocks[:200]
+    except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
         pass
 
-    # ✅ حد أقصى 6000 حرف للنص — كافٍ لـ GPT-4o-mini ويوفر ذاكرة
+    # ✅ حد أقصى 6000 حرف للنص — كافٍ لـ GPT-4o-mini ويوفر ذاكرة وزمن
     text_to_extract = (doc.extracted_text or "")[:6000]
 
+    result = None
     try:
         result = extract_document_data(text_to_extract, layout_blocks)
     except Exception as e:
         logger.error(f"Extraction failed for doc {doc_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Extraction failed: {e}")
     finally:
-        # ✅ تحرير الذاكرة دائماً حتى في حالة الخطأ
-        del layout_blocks
+        # ✅ تحرير الذاكرة دائماً حتى عند الخطأ
+        del layout_blocks, text_to_extract
         gc.collect()
 
     doc.doc_type = result.get("type", "other")
     doc.extracted_metadata = json.dumps(result, ensure_ascii=False)
     db.commit()
     db.refresh(doc)
-    return {"doc_id": doc_id, "result": result}
-
+    return {"doc_id": doc_id, **result}
 
 
 @app.get("/api/documents/{doc_id}/extract")
 def get_extraction(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-
     try:
         meta = json.loads(doc.extracted_metadata or "{}")
     except (json.JSONDecodeError, TypeError):
         meta = {}
-
     return {"doc_id": doc_id, "type": doc.doc_type or "unknown", **meta}
 
 
 class ExtractUpdate(BaseModel):
     metadata: Dict[str, Any]
 
+
 @app.put("/api/documents/{doc_id}/extract")
 def update_extraction(doc_id: int, payload: ExtractUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-
     doc.extracted_metadata = json.dumps(payload.metadata, ensure_ascii=False)
     db.commit()
     return {"doc_id": doc_id, "type": doc.doc_type or "unknown", **payload.metadata}
 
 
-@app.get("/api/documents/{doc_id}/export")
-def export_document(
-    doc_id: int,
-    format: str = Query(default="csv", regex="^(csv|excel|txt)$"),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
-):
-    doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+# ── Export helpers ────────────────────────────────────────────────────────────
 
-    try:
-        meta = json.loads(doc.extracted_metadata or "{}")
-    except (json.JSONDecodeError, TypeError):
-        meta = {}
+def _extract_val(meta: dict, key: str) -> str:
+    val = meta.get(key)
+    if isinstance(val, dict):
+        return val.get("value") or ""
+    return val or ""
 
-    def _extract_val(data, key):
-        val = data.get(key)
-        if isinstance(val, dict):
-            return val.get("value") or ""
-        return val or ""
 
-    row = {
+def _build_row(doc: Document, meta: dict) -> dict:
+    return {
         "ID": doc.id,
         "Original Filename": doc.original_filename,
         "File Type": doc.file_type,
@@ -955,66 +950,110 @@ def export_document(
         "Client Name": _extract_val(meta, "client_name"),
     }
 
-    base_name = doc.original_filename.rsplit(".", 1)[0] if "." in doc.original_filename else doc.original_filename
 
-    if format == "txt":
-        output = io.StringIO()
-        output.write("=== AI Extraction Metadata ===\n\n")
+EXPORT_HEADERS = [
+    "ID", "Original Filename", "File Type", "File Size (bytes)",
+    "Pages", "Status", "Created At",
+    "Document Type", "Invoice Number", "Date", "Due Date", "Expiry Date",
+    "Total Amount", "Currency", "Company", "Client Name",
+]
+
+
+def _stream_csv(rows: list, headers: list, filename: str) -> StreamingResponse:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _stream_txt(rows: list, title: str, filename: str) -> StreamingResponse:
+    output = io.StringIO()
+    output.write(f"=== {title} ===\n\n")
+    for i, row in enumerate(rows):
+        output.write(f"--- Document {i+1} ---\n")
         for key, value in row.items():
             output.write(f"{key}: {value}\n")
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="{base_name}_metadata.txt"'},
-        )
+        output.write("\n")
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
-    if format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=list(row.keys()))
-        writer.writeheader()
-        writer.writerow(row)
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{base_name}_metadata.csv"'},
-        )
 
+def _stream_excel(rows: list, headers: list, filename: str, sheet_title: str = "Documents") -> StreamingResponse:
     from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
     wb = Workbook()
     ws = wb.active
-    ws.title = "Metadata"
-    ws.append(list(row.keys()))
-    ws.append(list(row.values()))
-
+    ws.title = sheet_title
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center")
+    for row in rows:
+        ws.append([row.get(h, "") for h in headers])
     for column in ws.columns:
         max_len = max(len(str(cell.value or "")) for cell in column)
         ws.column_dimensions[column[0].column_letter].width = min(max_len + 4, 50)
-
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
     return StreamingResponse(
-        iter([excel_buf.read()]),
+        iter([buf.read()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{base_name}_metadata.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Export endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/documents/{doc_id}/export")
+def export_document(
+    doc_id: int,
+    format: str = Query(default="csv", regex="^(csv|excel|txt)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    doc = db.query(Document).filter(
+        Document.id == doc_id,
+        Document.organization_id == current_user.organization_id
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        meta = json.loads(doc.extracted_metadata or "{}")
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+
+    row = _build_row(doc, meta)
+    base_name = doc.original_filename.rsplit(".", 1)[0] if "." in doc.original_filename else doc.original_filename
+
+    if format == "txt":
+        return _stream_txt([row], "AI Extraction Metadata", f"{base_name}_metadata.txt")
+    if format == "csv":
+        return _stream_csv([row], list(row.keys()), f"{base_name}_metadata.csv")
+    return _stream_excel([row], list(row.keys()), f"{base_name}_metadata.xlsx", "Metadata")
 
 
 @app.get("/api/export/all")
 def export_all_documents(
     format: str = Query(default="csv", regex="^(csv|excel|txt)$"),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    docs = db.query(Document).filter(Document.file_type != "folder", Document.organization_id == current_user.organization_id).order_by(Document.created_at.desc()).all()
-
-    headers = [
-        "ID", "Original Filename", "File Type", "File Size (bytes)",
-        "Pages", "Status", "Created At",
-        "Document Type", "Invoice Number", "Date", "Due Date", "Expiry Date", 
-        "Total Amount", "Currency", "Company", "Client Name",
-    ]
+    docs = db.query(Document).filter(
+        Document.file_type != "folder",
+        Document.organization_id == current_user.organization_id
+    ).order_by(Document.created_at.desc()).all()
 
     rows = []
     for doc in docs:
@@ -1022,257 +1061,26 @@ def export_all_documents(
             meta = json.loads(doc.extracted_metadata or "{}")
         except (json.JSONDecodeError, TypeError):
             meta = {}
-        rows.append({
-            "ID": doc.id,
-            "Original Filename": doc.original_filename,
-            "File Type": doc.file_type,
-            "File Size (bytes)": doc.file_size,
-            "Pages": doc.page_count,
-            "Status": doc.status,
-            "Created At": doc.created_at.isoformat() if doc.created_at else "",
-            "Document Type": doc.doc_type or "unknown",
-            "Invoice Number": meta.get("invoice_number", {}).get("value") if isinstance(meta.get("invoice_number"), dict) else meta.get("invoice_number", ""),
-            "Date": meta.get("date", {}).get("value") if isinstance(meta.get("date"), dict) else meta.get("date", ""),
-            "Due Date": meta.get("due_date", {}).get("value") if isinstance(meta.get("due_date"), dict) else meta.get("due_date", ""),
-            "Expiry Date": meta.get("expiry_date", {}).get("value") if isinstance(meta.get("expiry_date"), dict) else meta.get("expiry_date", ""),
-            "Total Amount": meta.get("total_amount", {}).get("value") if isinstance(meta.get("total_amount"), dict) else meta.get("total_amount", ""),
-            "Currency": meta.get("currency", {}).get("value") if isinstance(meta.get("currency"), dict) else meta.get("currency", ""),
-            "Company": meta.get("company", {}).get("value") if isinstance(meta.get("company"), dict) else meta.get("company", ""),
-            "Client Name": meta.get("client_name", {}).get("value") if isinstance(meta.get("client_name"), dict) else meta.get("client_name", ""),
-        })
+        rows.append(_build_row(doc, meta))
 
     if format == "txt":
-        output = io.StringIO()
-        output.write("=== All Documents Extraction Metadata ===\n\n")
-        for i, row in enumerate(rows):
-            output.write(f"--- Document {i+1} ---\n")
-            for key, value in row.items():
-                output.write(f"{key}: {value}\n")
-            output.write("\n")
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": 'attachment; filename="all_documents.txt"'},
-        )
-
+        return _stream_txt(rows, "All Documents Extraction Metadata", "all_documents.txt")
     if format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="all_documents.csv"'},
-        )
+        return _stream_csv(rows, EXPORT_HEADERS, "all_documents.csv")
+    return _stream_excel(rows, EXPORT_HEADERS, "all_documents.xlsx", "Documents")
 
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Documents"
-
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-        cell.alignment = Alignment(horizontal="center")
-
-    for row in rows:
-        ws.append([row[h] for h in headers])
-
-    for column in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        ws.column_dimensions[column[0].column_letter].width = min(max_len + 4, 50)
-
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
-    return StreamingResponse(
-        iter([excel_buf.read()]),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="all_documents.xlsx"'},
-    )
-
-
-@app.post("/api/export/custom")
-async def export_custom_documents(
-    payload: SearchQuery,
-    format: str = Query(default="excel", regex="^(csv|excel|txt)$"),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
-):
-    filters = payload.filters or {}
-    docs = db.query(Document).filter(Document.file_type != "folder", Document.organization_id == current_user.organization_id).order_by(Document.created_at.desc()).all()
-    
-    matched_docs = []
-    for doc in docs:
-        try:
-            meta = json.loads(doc.extracted_metadata or "{}")
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-            
-        match = True
-        
-        if filters.get("document_type"):
-            dtype = filters["document_type"].lower()
-            if (doc.doc_type or "").lower() != dtype:
-                match = False
-                
-        if match and filters.get("company"):
-            company_val = meta.get("company", {}).get("value", "") if isinstance(meta.get("company"), dict) else meta.get("company", "")
-            if filters["company"].lower() not in (company_val or "").lower():
-                match = False
-                
-        if match and filters.get("client_name"):
-            client_val = meta.get("client_name", {}).get("value", "") if isinstance(meta.get("client_name"), dict) else meta.get("client_name", "")
-            if filters["client_name"].lower() not in (client_val or "").lower():
-                match = False
-
-        if match and filters.get("invoice_number"):
-            inv_val = meta.get("invoice_number", {}).get("value", "") if isinstance(meta.get("invoice_number"), dict) else meta.get("invoice_number", "")
-            if filters["invoice_number"].lower() not in (inv_val or "").lower():
-                match = False
-                
-        if match and filters.get("date_range"):
-            dr = filters["date_range"]
-            if dr:
-                d_from = dr.get("from")
-                d_to = dr.get("to")
-                
-                if d_from or d_to:
-                    date_val = meta.get("date", {}).get("value", "") if isinstance(meta.get("date"), dict) else meta.get("date", "")
-                    if not date_val:
-                        match = False
-                    else:
-                        parsed_date = None
-                        try:
-                            # Handle DD/MM/YYYY or MM/DD/YYYY to YYYY-MM
-                            parts = str(date_val).replace('-', '/').replace('.', '/').split('/')
-                            if len(parts) >= 2:
-                                if len(parts[-1]) == 4:
-                                    dt = datetime(int(parts[-1]), int(parts[-2]), int(parts[0]) if len(parts)==3 else 1)
-                                elif len(parts[0]) == 4:
-                                    dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts)==3 else 1)
-                                else:
-                                    dt = datetime.now()
-                                parsed_date = dt.strftime("%Y-%m")
-                        except Exception:
-                            pass
-                        
-                        if parsed_date:
-                            if d_from and parsed_date < d_from:
-                                match = False
-                            if d_to and parsed_date > d_to:
-                                match = False
-                        else:
-                            match = False
-
-        if match and filters.get("keyword"):
-            kw = filters["keyword"].lower()
-            if kw not in doc.original_filename.lower() and kw not in (doc.extracted_text or "").lower():
-                match = False
-
-        if match:
-            matched_docs.append(doc)
-
-    # Export logic (reused from export_all)
-    headers = [
-        "ID", "Original Filename", "File Type", "File Size (bytes)",
-        "Pages", "Status", "Created At",
-        "Document Type", "Invoice Number", "Date", "Due Date",
-        "Total Amount", "Currency", "Company", "Client Name",
-    ]
-    
-    rows = []
-    for doc in matched_docs:
-        try:
-            meta = json.loads(doc.extracted_metadata or "{}")
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-            
-        def _get(m, k):
-            v = m.get(k)
-            return v.get("value") if isinstance(v, dict) else v or ""
-
-        rows.append({
-            "ID": doc.id,
-            "Original Filename": doc.original_filename,
-            "File Type": doc.file_type,
-            "File Size (bytes)": doc.file_size,
-            "Pages": doc.page_count,
-            "Status": doc.status,
-            "Created At": doc.created_at.isoformat() if doc.created_at else "",
-            "Document Type": doc.doc_type or "unknown",
-            "Invoice Number": _get(meta, "invoice_number"),
-            "Date": _get(meta, "date"),
-            "Due Date": _get(meta, "due_date"),
-            "Total Amount": _get(meta, "total_amount"),
-            "Currency": _get(meta, "currency"),
-            "Company": _get(meta, "company"),
-            "Client Name": _get(meta, "client_name"),
-        })
-
-    if format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="filtered_export.csv"'}
-        )
-    
-    if format == "txt":
-        output = io.StringIO()
-        for r in rows:
-            output.write(f"ID: {r['ID']} | File: {r['Original Filename']} | Type: {r['Document Type']}\n")
-            output.write("-" * 40 + "\n")
-            for k, v in r.items():
-                output.write(f"{k}: {v}\n")
-            output.write("\n")
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": 'attachment; filename="filtered_export.txt"'}
-        )
-
-    from openpyxl import Workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.append(headers)
-    for r in rows:
-        ws.append([r[h] for h in headers])
-    
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
-    return StreamingResponse(
-        iter([excel_buf.read()]),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="filtered_export.xlsx"'}
-    )
 
 @app.get("/api/export/folder/{folder_id}")
 def export_folder_documents(
     folder_id: int,
     format: str = Query(default="csv", regex="^(csv|excel|txt)$"),
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    # SECURITY FIX: Added tenant isolation filter
     docs = db.query(Document).filter(
         Document.parent_id == folder_id,
         Document.organization_id == current_user.organization_id
     ).order_by(Document.id.asc()).all()
-
-    headers = [
-        "ID", "Original Filename", "File Type", "File Size (bytes)",
-        "Pages", "Status", "Created At",
-        "Document Type", "Invoice Number", "Date", "Due Date", "Expiry Date", 
-        "Total Amount", "Currency", "Company", "Client Name",
-    ]
 
     rows = []
     for doc in docs:
@@ -1280,105 +1088,36 @@ def export_folder_documents(
             meta = json.loads(doc.extracted_metadata or "{}")
         except (json.JSONDecodeError, TypeError):
             meta = {}
-        rows.append({
-            "ID": doc.id,
-            "Original Filename": doc.original_filename,
-            "File Type": doc.file_type,
-            "File Size (bytes)": doc.file_size,
-            "Pages": doc.page_count,
-            "Status": doc.status,
-            "Created At": doc.created_at.isoformat() if doc.created_at else "",
-            "Document Type": doc.doc_type or "unknown",
-            "Invoice Number": meta.get("invoice_number", {}).get("value") if isinstance(meta.get("invoice_number"), dict) else meta.get("invoice_number", ""),
-            "Date": meta.get("date", {}).get("value") if isinstance(meta.get("date"), dict) else meta.get("date", ""),
-            "Due Date": meta.get("due_date", {}).get("value") if isinstance(meta.get("due_date"), dict) else meta.get("due_date", ""),
-            "Expiry Date": meta.get("expiry_date", {}).get("value") if isinstance(meta.get("expiry_date"), dict) else meta.get("expiry_date", ""),
-            "Total Amount": meta.get("total_amount", {}).get("value") if isinstance(meta.get("total_amount"), dict) else meta.get("total_amount", ""),
-            "Currency": meta.get("currency", {}).get("value") if isinstance(meta.get("currency"), dict) else meta.get("currency", ""),
-            "Company": meta.get("company", {}).get("value") if isinstance(meta.get("company"), dict) else meta.get("company", ""),
-            "Client Name": meta.get("client_name", {}).get("value") if isinstance(meta.get("client_name"), dict) else meta.get("client_name", ""),
-        })
+        rows.append(_build_row(doc, meta))
 
     if format == "txt":
-        output = io.StringIO()
-        output.write(f"=== Folder {folder_id} Documents Extraction Metadata ===\n\n")
-        for i, row in enumerate(rows):
-            output.write(f"--- Document {i+1} ---\n")
-            for key, value in row.items():
-                output.write(f"{key}: {value}\n")
-            output.write("\n")
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="folder_{folder_id}_documents.txt"'},
-        )
-
+        return _stream_txt(rows, f"Folder {folder_id} Documents Extraction Metadata", f"folder_{folder_id}_documents.txt")
     if format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="folder_{folder_id}_documents.csv"'},
-        )
+        return _stream_csv(rows, EXPORT_HEADERS, f"folder_{folder_id}_documents.csv")
+    return _stream_excel(rows, EXPORT_HEADERS, f"folder_{folder_id}_documents.xlsx", "Documents")
 
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Documents"
 
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-        cell.alignment = Alignment(horizontal="center")
-
-    for row in rows:
-        ws.append([row[h] for h in headers])
-
-    for column in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        ws.column_dimensions[column[0].column_letter].width = min(max_len + 4, 50)
-
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
-    return StreamingResponse(
-        iter([excel_buf.read()]),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="folder_{folder_id}_documents.xlsx"'},
-    )
+# ── ✅ FIX-4: تعريف مزدوج لـ export/custom محذوف — نسخة واحدة فقط ──────────
 
 class ExportQuery(BaseModel):
     filters: dict = None
     document_ids: List[int] = None
     format: str = "csv"
 
+
 @app.post("/api/export/ids")
 def export_documents_by_ids(
     payload: ExportQuery,
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     if not payload.document_ids:
         raise HTTPException(status_code=400, detail="document_ids list is required")
-        
-    # SECURITY FIX: Added tenant isolation filter
+
     docs = db.query(Document).filter(
         Document.id.in_(payload.document_ids),
         Document.organization_id == current_user.organization_id
     ).all()
-    
-    headers = [
-        "ID", "Original Filename", "File Type", "File Size (bytes)",
-        "Pages", "Status", "Created At",
-        "Document Type", "Invoice Number", "Date", "Due Date", "Expiry Date", 
-        "Total Amount", "Currency", "Company", "Client Name",
-    ]
 
     rows = []
     for doc in docs:
@@ -1386,176 +1125,42 @@ def export_documents_by_ids(
             meta = json.loads(doc.extracted_metadata or "{}")
         except (json.JSONDecodeError, TypeError):
             meta = {}
-            
-        def _get_v(k):
-            v = meta.get(k, "")
-            return v.get("value") if isinstance(v, dict) else v
+        rows.append(_build_row(doc, meta))
 
-        rows.append({
-            "ID": doc.id,
-            "Original Filename": doc.original_filename,
-            "File Type": doc.file_type,
-            "File Size (bytes)": doc.file_size,
-            "Pages": doc.page_count,
-            "Status": doc.status,
-            "Created At": doc.created_at.isoformat() if doc.created_at else "",
-            "Document Type": doc.doc_type or "unknown",
-            "Invoice Number": _get_v("invoice_number"),
-            "Date": _get_v("date"),
-            "Due Date": _get_v("due_date"),
-            "Expiry Date": _get_v("expiry_date"),
-            "Total Amount": _get_v("total_amount"),
-            "Currency": _get_v("currency"),
-            "Company": _get_v("company"),
-            "Client Name": _get_v("client_name"),
-        })
-
-    filename_prefix = "ai_results"
-    
     if payload.format == "txt":
-        output = io.StringIO()
-        output.write("=== AI Assistant Results Export ===\n\n")
-        for i, row in enumerate(rows):
-            output.write(f"--- Document {i+1} ---\n")
-            for key, value in row.items():
-                output.write(f"{key}: {value}\n")
-            output.write("\n")
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="{filename_prefix}.txt"'},
-        )
-
+        return _stream_txt(rows, "AI Assistant Results Export", "ai_results.txt")
     if payload.format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{filename_prefix}.csv"'},
-        )
+        return _stream_csv(rows, EXPORT_HEADERS, "ai_results.csv")
+    return _stream_excel(rows, EXPORT_HEADERS, "ai_results.xlsx", "Results")
 
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Results"
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-    
-    for row in rows:
-        ws.append([row[h] for h in headers])
-        
-    for column in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        ws.column_dimensions[column[0].column_letter].width = min(max_len + 5, 50)
-
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
-    return StreamingResponse(
-        iter([excel_buf.read()]),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename_prefix}.xlsx"'},
-    )
 
 @app.post("/api/export/custom")
 def export_custom_documents(
     payload: ExportQuery,
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    # SECURITY FIX: Pass current_user for tenant isolation
+    # ✅ FIX-4: استخدام ExportQuery + فلترة مباشرة من DB بدلاً من استدعاء search_documents
     sq = SearchQuery(filters=payload.filters)
     search_res = search_documents(sq, db, current_user=current_user)
-    matching_docs = search_res["results"]
-    
-    headers = [
-        "ID", "Original Filename", "File Type", "File Size (bytes)",
-        "Pages", "Status", "Created At",
-        "Document Type", "Invoice Number", "Date", "Due Date", "Expiry Date", 
-        "Total Amount", "Currency", "Company", "Client Name",
-    ]
+
+    # جمع IDs من نتائج البحث ثم قراءة من DB مباشرة للحصول على extracted_metadata
+    matched_ids = [d["id"] for d in search_res["results"]]
+    docs = db.query(Document).filter(
+        Document.id.in_(matched_ids),
+        Document.organization_id == current_user.organization_id
+    ).all() if matched_ids else []
 
     rows = []
-    for d in matching_docs:
-        meta = d.get("extracted_metadata", {})
-        rows.append({
-            "ID": d["id"],
-            "Original Filename": d["original_filename"],
-            "File Type": d["file_type"],
-            "File Size (bytes)": d["file_size"],
-            "Pages": d["page_count"],
-            "Status": d["status"],
-            "Created At": d["created_at"],
-            "Document Type": d["doc_type"],
-            "Invoice Number": meta.get("invoice_number", {}).get("value") if isinstance(meta.get("invoice_number"), dict) else meta.get("invoice_number", ""),
-            "Date": meta.get("date", {}).get("value") if isinstance(meta.get("date"), dict) else meta.get("date", ""),
-            "Due Date": meta.get("due_date", {}).get("value") if isinstance(meta.get("due_date"), dict) else meta.get("due_date", ""),
-            "Expiry Date": meta.get("expiry_date", {}).get("value") if isinstance(meta.get("expiry_date"), dict) else meta.get("expiry_date", ""),
-            "Total Amount": meta.get("total_amount", {}).get("value") if isinstance(meta.get("total_amount"), dict) else meta.get("total_amount", ""),
-            "Currency": meta.get("currency", {}).get("value") if isinstance(meta.get("currency"), dict) else meta.get("currency", ""),
-            "Company": meta.get("company", {}).get("value") if isinstance(meta.get("company"), dict) else meta.get("company", ""),
-            "Client Name": meta.get("client_name", {}).get("value") if isinstance(meta.get("client_name"), dict) else meta.get("client_name", ""),
-        })
+    for doc in docs:
+        try:
+            meta = json.loads(doc.extracted_metadata or "{}")
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        rows.append(_build_row(doc, meta))
 
     if payload.format == "txt":
-        output = io.StringIO()
-        output.write("=== Custom Export Metadata ===\n\n")
-        output.write(f"Filters Applied: {payload.filters}\n\n")
-        for i, row in enumerate(rows):
-            output.write(f"--- Document {i+1} ---\n")
-            for key, value in row.items():
-                output.write(f"{key}: {value}\n")
-            output.write("\n")
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/plain",
-            headers={"Content-Disposition": 'attachment; filename="custom_export.txt"'},
-        )
-
+        return _stream_txt(rows, "Custom Export Metadata", "custom_export.txt")
     if payload.format == "csv":
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=headers)
-        writer.writeheader()
-        writer.writerows(rows)
-        output.seek(0)
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="custom_export.csv"'},
-        )
-
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Documents"
-
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
-        cell.alignment = Alignment(horizontal="center")
-
-    for row in rows:
-        ws.append([row[h] for h in headers])
-
-    for column in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        ws.column_dimensions[column[0].column_letter].width = min(max_len + 4, 50)
-
-    excel_buf = io.BytesIO()
-    wb.save(excel_buf)
-    excel_buf.seek(0)
-    return StreamingResponse(
-        iter([excel_buf.read()]),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="custom_export.xlsx"'},
-    )
+        return _stream_csv(rows, EXPORT_HEADERS, "custom_export.csv")
+    return _stream_excel(rows, EXPORT_HEADERS, "custom_export.xlsx", "Documents")
