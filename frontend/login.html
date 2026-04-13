@@ -16,54 +16,67 @@
             min-height: 100vh;
             margin: 0;
             background: var(--bg-primary, #111214);
-            background-image: radial-gradient(circle at 50% 0%, rgba(79, 70, 229, 0.15) 0%, transparent 50%);
-            font-family: 'Inter', -apple-system, sans-serif;
+            font-family: var(--font, 'Inter', sans-serif);
             color: var(--text-primary, #F2F2F3);
+            overflow: hidden;
         }
+
         .auth-wrapper {
             width: 100%;
-            max-width: 420px;
+            max-width: 400px;
             padding: 24px;
             z-index: 10;
+            animation: fadeIn 0.5s ease-out;
         }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
         .auth-header {
             text-align: center;
             margin-bottom: 32px;
         }
+
         .logo-container {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 52px;
-            height: 52px;
-            background: var(--text-primary, #F2F2F3);
+            width: 48px;
+            height: 48px;
+            background: var(--text-primary, #FFFFFF);
             color: var(--bg-primary, #111214);
-            border-radius: 12px;
-            margin-bottom: 16px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
         }
+
         .auth-header h1 {
-            font-size: 1.75rem;
+            font-size: 1.5rem;
             font-weight: 700;
             letter-spacing: -0.02em;
-            margin-bottom: 8px;
-            color: var(--text-primary, #fff);
+            margin-bottom: 6px;
+            color: var(--text-primary);
         }
+
         .auth-header p {
             color: var(--text-muted, #76777B);
-            font-size: 0.95rem;
+            font-size: 0.9rem;
         }
+
         .auth-card {
             background: var(--bg-card, #1A1B1E);
             border: 1px solid var(--border, #2E2F33);
-            border-radius: 12px;
+            border-radius: 8px;
             padding: 32px;
             box-shadow: 0 10px 40px rgba(0,0,0,0.5);
-            backdrop-filter: blur(10px);
         }
+
         .form-group {
             margin-bottom: 20px;
         }
+
         .form-group label {
             display: block;
             margin-bottom: 8px;
@@ -71,22 +84,25 @@
             font-weight: 500;
             color: var(--text-secondary, #A1A2A6);
         }
-        .form-group .input-wrapper {
+
+        .input-wrapper {
             position: relative;
             display: flex;
             align-items: center;
         }
-        .form-group .input-icon {
+
+        .input-icon {
             position: absolute;
             left: 14px;
             color: var(--text-muted, #76777B);
             pointer-events: none;
             display: flex;
         }
-        .form-group .password-toggle {
+
+        .password-toggle {
             position: absolute;
             right: 14px;
-            color: var(--text-muted, #76777B);
+            color: var(--text-muted);
             background: none;
             border: none;
             cursor: pointer;
@@ -94,66 +110,66 @@
             display: flex;
             transition: color 0.2s;
         }
-        .form-group .password-toggle:hover {
-            color: var(--text-primary, #F2F2F3);
-        }
+
         .form-group input {
             width: 100%;
-            padding: 12px 42px; /* Padding for left and right icons */
+            padding: 12px 14px 12px 42px;
             background: var(--bg-primary, #111214);
             border: 1px solid var(--border, #2E2F33);
-            border-radius: 8px;
-            color: var(--text-primary, #F2F2F3);
+            border-radius: 6px;
+            color: var(--text-primary);
             font-family: inherit;
             font-size: 0.95rem;
             transition: all 0.2s;
             box-sizing: border-box;
             outline: none;
         }
+
         .form-group input:focus {
-            border-color: #4F46E5;
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+            border-color: var(--text-primary, #FFFFFF);
+            background: var(--bg-secondary, #161719);
         }
-        .form-group input::placeholder {
-            color: var(--text-muted, #76777B);
-        }
+
         .auth-btn {
             width: 100%;
             padding: 12px;
-            background: #4F46E5;
-            color: white;
+            background: var(--text-primary, #FFFFFF);
+            color: var(--bg-primary, #111214);
             border: none;
-            border-radius: 8px;
+            border-radius: 6px;
             font-size: 0.95rem;
-            font-weight: 600;
+            font-weight: 700;
             cursor: pointer;
             transition: all 0.2s;
             margin-top: 8px;
-            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+            box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
         }
+
         .auth-btn:hover {
-            background: #4338CA;
+            opacity: 0.9;
             transform: translateY(-1px);
-            box-shadow: 0 6px 16px rgba(79, 70, 229, 0.4);
         }
+
         .auth-footer {
             text-align: center;
             margin-top: 24px;
             font-size: 0.9rem;
             color: var(--text-muted, #76777B);
         }
+
         .auth-footer a {
-            color: #4F46E5;
+            color: var(--text-primary, #FFFFFF);
             text-decoration: none;
-            font-weight: 500;
-            transition: color 0.2s;
+            font-weight: 600;
+            margin-left: 4px;
         }
+
         .auth-footer a:hover {
-            color: #6366F1;
             text-decoration: underline;
         }
+
         #login-error {
-            color: #EF4444;
+            color: #ef4444;
             font-size: 0.85rem;
             margin-bottom: 16px;
             padding: 10px;
@@ -175,8 +191,8 @@
                     <polyline points="2 12 12 17 22 12"></polyline>
                 </svg>
             </div>
-            <h1>Welcome Back</h1>
-            <p>Sign in to your Arkivo workspace</p>
+            <h1>Arkivo AI</h1>
+            <p>Sign in to your workspace</p>
         </div>
 
         <div class="auth-card">
@@ -216,8 +232,7 @@
     <script>
         // Check for existing theme setup
         const savedTheme = localStorage.getItem('arkivo_theme');
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        const initialTheme = savedTheme || (prefersDark ? 'dark' : 'light');
+        const initialTheme = savedTheme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', initialTheme);
 
         function togglePassword(inputId, btn) {
@@ -240,7 +255,6 @@
             
             submitBtn.textContent = 'Signing in...';
             submitBtn.disabled = true;
-            submitBtn.style.opacity = '0.7';
 
             try {
                 const response = await fetch('/api/auth/login', {
@@ -255,20 +269,16 @@
                     window.location.href = 'index.html';
                 } else {
                     const errData = await response.json();
-                    errorDiv.innerText = errData.detail || 'Login failed. Please verify your credentials.';
+                    errorDiv.innerText = errData.detail || 'Login failed';
                     errorDiv.style.display = 'block';
-                    
                     submitBtn.textContent = 'Sign In';
                     submitBtn.disabled = false;
-                    submitBtn.style.opacity = '1';
                 }
             } catch (err) {
-                errorDiv.innerText = 'Network error. Please try again.';
+                errorDiv.innerText = 'Network error';
                 errorDiv.style.display = 'block';
-                
                 submitBtn.textContent = 'Sign In';
                 submitBtn.disabled = false;
-                submitBtn.style.opacity = '1';
             }
         });
     </script>

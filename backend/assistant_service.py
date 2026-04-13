@@ -11,9 +11,8 @@ import requests
 import datetime
 import re
 from sqlalchemy.orm import Session
-from models import Document
-
-from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
+from backend.models import Document
+from backend.config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_UR
 
 logger = logging.getLogger(__name__)
 

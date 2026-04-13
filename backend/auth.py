@@ -11,9 +11,9 @@ import bcrypt
 from fastapi import Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import User
-from config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_MINUTES
+from backend.database import get_db
+from backend.models import User
+from backend.config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_MINUTES
 
 
 
@@ -80,3 +80,21 @@ def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+def require_admin(current_user: User = Depends(get_current_user)):
+    """Dependency that requires admin or super_admin role."""
+    if current_user.role not in ("admin", "super_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. Admin access required."
+        )
+    return current_user
+
+def require_super_admin(current_user: User = Depends(get_current_user)):
+    """Dependency that requires super_admin role."""
+    if current_user.role != "super_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. Super Admin access required."
+        )
+    return current_user

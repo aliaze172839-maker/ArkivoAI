@@ -95,7 +95,7 @@ window.copyInviteCode = function () {
             btn.style.background = 'var(--success, #10B981)';
             setTimeout(() => {
                 btn.textContent = origText;
-                btn.style.background = '#4F46E5';
+                btn.style.background = '#3b82f6';
             }, 2000);
         }
     }).catch(console.error);
@@ -241,8 +241,26 @@ const dictionary = {
     "Export to Excel": "Eksporto në Excel",
     "Export to Text": "Eksporto në Tekst",
     "Field": "Fusha",
-    "Value": "Vlera"
+    "Value": "Vlera",
+    "Good morning": "Mirëmëngjes",
+    "Good afternoon": "Mirëdita",
+    "Good evening": "Mirëmbrëma",
+    "Matched Document": "Dokument i Përputhur",
+    "Matched Documents": "Dokumente të Përputhura",
+    "Save Metadata": "Ruaj të Dhënat"
 };
+
+/**
+ * Global translation helper for dynamic content.
+ * Returns Albanian translation if 'sq' is active, otherwise returns original English key.
+ */
+function t(key) {
+    const lang = localStorage.getItem('arkivo_lang') || 'en';
+    if (lang === 'sq' && dictionary && dictionary[key]) {
+        return dictionary[key];
+    }
+    return key;
+}
 
 let i18nNodes = new Map();
 
@@ -353,6 +371,7 @@ const assistantChatInput = document.getElementById('assistantChatInput');
 const assistantSendBtn = document.getElementById('assistantSendBtn');
 
 let allDocuments = [];
+let currentFolderId = null; // Added here for consistency
 let currentDocId = null;
 let currentDocName = '';
 let currentDocType = '';
@@ -445,7 +464,8 @@ function setupUploadHandlers() {
         document.querySelectorAll('.export-dropdown-item[data-export-all]').forEach(item => {
             item.addEventListener('click', (e) => {
                 const format = e.target.closest('.export-dropdown-item').dataset.exportAll;
-                window.location.href = `${API_BASE}/api/export/all?format=${format}`;
+                const token = localStorage.getItem('token');
+                window.location.href = `${API_BASE}/api/export/all?format=${format}&token=${encodeURIComponent(token)}`;
                 exportAllDropdownMenu.style.display = 'none';
             });
         });
@@ -601,7 +621,125 @@ async function handleBatchUpload(files) {
 }
 
 // ═══ Documents List ═════════════════════════════════════════════════════════
-let currentFolderId = null;
+// currentFolderId and allDocuments are declared above (around line 373)
+
+/**
+ * ═══ Global Actions (Exposed to HTML onclick) ══════════════════════════════
+ */
+
+// 1. Export folder documents
+function exportFolderDocs(format) {
+    if (!currentFolderId) {
+        showToast('Error: Folder not found', 'error');
+        return;
+    }
+    const token = localStorage.getItem('token');
+    const url = `${API_BASE}/api/export/folder/${currentFolderId}?format=${format}&token=${encodeURIComponent(token)}`;
+
+    // Use an anchor tag to trigger download
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = ''; // Filename is handled by the server
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    const menu = document.getElementById('folderExportAllDropdownMenu');
+    if (menu) menu.style.display = 'none';
+}
+
+// 2. Toggle folder export menu
+function toggleFolderExportMenu(e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById('folderExportAllDropdownMenu');
+    if (menu) {
+        menu.style.display = (menu.style.display === 'none' || !menu.style.display) ? 'flex' : 'none';
+    }
+}
+
+// 3. AI Data Extraction for ALL docs in folder
+async function extractAllFolderDocs() {
+    if (!currentFolderId) return;
+
+    const btn = document.getElementById('folderExtractAllBtn');
+    if (!btn) return;
+    const originalHtml = btn.innerHTML;
+    const originalWidth = btn.offsetWidth;
+
+    // UI state while running
+    btn.style.width = originalWidth + 'px';
+    btn.style.position = 'relative';
+    btn.style.overflow = 'hidden';
+    btn.style.pointerEvents = 'none';
+    btn.innerHTML = `
+        <div id="extractProgressFill" style="position:absolute; left:0; bottom:0; width:0%; height:4px; background:var(--success, #10B981); transition: width 0.3s ease; z-index:1; border-radius: 0 0 6px 6px;"></div>
+        <div style="position:relative; z-index:2; display:flex; align-items:center; justify-content:center; width: 100%; gap:8px;">
+            <div class="preview-spinner" style="width:14px;height:14px;borderWidth:2px;margin:0"></div>
+            <span id="extractProgressText" style="font-size: 13px; font-weight: 500;">Starting...</span>
+        </div>
+    `;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/documents/${currentFolderId}/children`);
+        if (!response.ok) throw new Error('Failed to fetch folder docs');
+        const children = await response.json();
+
+        // Documents that are ready to be extracted
+        const validDocs = children.filter(child => child.status === 'completed' && child.file_type !== 'folder');
+        const total = validDocs.length;
+
+        if (total === 0) {
+            showToast('No completed documents found in this folder ready for extraction.', 'info');
+            btn.innerHTML = originalHtml;
+            btn.style.pointerEvents = 'auto';
+            btn.style.width = '';
+            return;
+        }
+
+        const progressFill = document.getElementById('extractProgressFill');
+        const progressText = document.getElementById('extractProgressText');
+
+        let successCount = 0;
+        for (let i = 0; i < total; i++) {
+            const child = validDocs[i];
+
+            if (progressText) progressText.textContent = `Extracting ${i + 1}/${total}`;
+            if (progressFill) progressFill.style.width = `${(i / total) * 100}%`;
+
+            try {
+                const extractRes = await fetch(`${API_BASE}/api/documents/${child.id}/extract`, { method: 'POST' });
+                if (extractRes.ok) successCount++;
+            } catch (e) {
+                console.error('Extraction failed for doc', child.id, e);
+            }
+        }
+
+        if (progressFill) progressFill.style.width = '100%';
+        if (progressText) progressText.textContent = 'Completed!';
+        showToast(`AI extraction finished for ${successCount} documents.`, 'success');
+
+        // Refresh at the end
+        setTimeout(() => {
+            if (currentFolderId) {
+                const currentName = document.getElementById('folderNavName')?.textContent || '';
+                openFolder(currentFolderId, currentName);
+            }
+        }, 800);
+
+    } catch (err) {
+        showToast('Error starting extraction: ' + err.message, 'error');
+    } finally {
+        setTimeout(() => {
+            const currentBtn = document.getElementById('folderExtractAllBtn');
+            if (currentBtn) {
+                currentBtn.innerHTML = originalHtml;
+                currentBtn.style.pointerEvents = 'auto';
+                currentBtn.style.width = '';
+            }
+        }, 1500);
+    }
+}
+
 
 async function loadDocuments() {
     try {
@@ -622,6 +760,19 @@ async function loadDocuments() {
 
 async function openFolder(docId, docName) {
     currentFolderId = docId;
+    // Switch to documents view WITHOUT triggering loadDocuments (fixes race condition bug)
+    // navAllDocs.click() was causing loadDocuments() → closeFolder() → currentFolderId = null
+    const _navItems = document.querySelectorAll('.sidebar-nav-item');
+    _navItems.forEach(i => i.classList.remove('active'));
+    const _navAllDocs = document.getElementById('navAllDocs');
+    if (_navAllDocs) _navAllDocs.classList.add('active');
+    ['dashboardSection', 'uploadSection', 'aiAssistantView', 'settingsView', 'superAdminView'].forEach(id => {
+        const s = document.getElementById(id); if (s) s.style.display = 'none';
+    });
+    const _docsSection = document.getElementById('documentsSection');
+    if (_docsSection) _docsSection.style.display = 'grid';
+    document.body.style.overflow = 'auto';
+    document.body.classList.remove('ai-view-active');
     try {
         const response = await fetch(`${API_BASE}/api/documents/${docId}/children`);
         if (!response.ok) throw new Error('Failed to load folder contents');
@@ -717,114 +868,14 @@ window.closeFolder = function () {
     currentFolderId = null;
     const nav = document.getElementById('folderNav');
     if (nav) nav.style.display = 'none';
+    const uploadSec = document.getElementById('uploadSection');
+    if (uploadSec) uploadSec.style.display = 'block';
     renderDocuments(allDocuments);
 };
 
 window.openFolder = openFolder;
 
-window.toggleFolderExportMenu = function (e) {
-    e.stopPropagation();
-    const menu = document.getElementById('folderExportAllDropdownMenu');
-    if (menu) {
-        menu.style.display = menu.style.display === 'flex' ? 'none' : 'flex';
-    }
-};
 
-window.exportFolderDocs = function (format) {
-    if (!currentFolderId) return;
-    window.location.href = `${API_BASE}/api/export/folder/${currentFolderId}?format=${format}`;
-    const menu = document.getElementById('folderExportAllDropdownMenu');
-    if (menu) menu.style.display = 'none';
-};
-
-window.extractAllFolderDocs = async function () {
-    if (!currentFolderId) return;
-
-    // Disable button visually and set up progress animation
-    const btn = document.getElementById('folderExtractAllBtn');
-    if (!btn) return;
-    const originalHtml = btn.innerHTML;
-    const originalWidth = btn.offsetWidth;
-
-    btn.style.width = originalWidth + 'px';
-    btn.style.position = 'relative';
-    btn.style.overflow = 'hidden';
-    btn.style.pointerEvents = 'none';
-
-    btn.innerHTML = `
-        <div id="extractProgressFill" style="position:absolute; left:0; bottom:0; width:0%; height:4px; background:var(--success, #10B981); transition: width 0.3s ease; z-index:1; border-radius: 0 0 6px 6px;"></div>
-        <div style="position:relative; z-index:2; display:flex; align-items:center; justify-content:center; width: 100%; gap:8px;">
-            <div class="preview-spinner" style="width:14px;height:14px;borderWidth:2px;margin:0"></div>
-            <span id="extractProgressText" style="font-size: 13px; font-weight: 500;">Starting...</span>
-        </div>
-    `;
-
-    try {
-        const response = await fetch(`${API_BASE}/api/documents/${currentFolderId}/children`);
-        if (!response.ok) throw new Error('Failed to fetch folder docs');
-        const children = await response.json();
-
-        // Filter out docs that already have metadata
-        const validDocs = children.filter(child => {
-            const hasText = child.status === 'completed' && child.extracted_text_preview;
-            const notExtracted = !child.extracted_metadata || Object.keys(child.extracted_metadata).length === 0;
-            return hasText && notExtracted;
-        });
-        const total = validDocs.length;
-
-        if (total === 0) {
-            showToast('All documents are already extracted or none are ready', 'info');
-
-            // Restore button
-            btn.innerHTML = originalHtml;
-            btn.style.pointerEvents = 'auto';
-            btn.style.width = '';
-            return;
-        }
-
-        const progressFill = document.getElementById('extractProgressFill');
-        const progressText = document.getElementById('extractProgressText');
-
-        let successCount = 0;
-        for (let i = 0; i < total; i++) {
-            const child = validDocs[i];
-
-            if (progressText) progressText.textContent = `Extracting ${i + 1}/${total}`;
-            if (progressFill) progressFill.style.width = `${(i / total) * 100}%`;
-
-            try {
-                const extractRes = await fetch(`${API_BASE}/api/documents/${child.id}/extract`, { method: 'POST' });
-                if (extractRes.ok) successCount++;
-            } catch (e) {
-                console.error('Failed to extract doc', child.id, e);
-            }
-        }
-
-        if (progressFill) progressFill.style.width = '100%';
-        if (progressText) progressText.textContent = 'Completed!';
-
-        showToast(`Extracted data for ${successCount} documents in folder`, 'success');
-
-        // Refresh folder view
-        setTimeout(() => {
-            if (currentFolderId && document.getElementById('folderNavName')) {
-                openFolder(currentFolderId, document.getElementById('folderNavName').textContent);
-            }
-        }, 600);
-
-    } catch (err) {
-        showToast('Failed to start folder extraction', 'error');
-    } finally {
-        setTimeout(() => {
-            const currentBtn = document.getElementById('folderExtractAllBtn');
-            if (currentBtn) {
-                currentBtn.innerHTML = originalHtml;
-                currentBtn.style.pointerEvents = 'auto';
-                currentBtn.style.width = '';
-            }
-        }, 1500);
-    }
-};
 
 function renderDocuments(docs, isFolderView = false) {
     if (docs.length === 0) {
@@ -860,8 +911,8 @@ function renderDocuments(docs, isFolderView = false) {
                             ${doc.page_count} pg
                         </span>
                     </div>
-                    <button class="doc-card-delete" onclick="event.stopPropagation(); window.deleteDocument(${doc.id}, '${escapeAttr(doc.original_filename)}')" title="Delete">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    <button class="doc-card-delete-mini" onclick="event.stopPropagation(); window.deleteDocument(${doc.id}, '${escapeAttr(doc.original_filename)}')" title="Delete">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                     </button>
                 </div>
             </div>`;
@@ -884,8 +935,8 @@ function renderDocuments(docs, isFolderView = false) {
                     </span>
                     ${!isFolderView ? `<span>${formatFileSize(doc.file_size)}</span>` : ''}
                 </div>
-                <button class="doc-card-delete" onclick="event.stopPropagation(); window.deleteDocument(${doc.id}, '${escapeAttr(doc.original_filename)}')" title="Delete">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                <button class="doc-card-delete-mini" onclick="event.stopPropagation(); window.deleteDocument(${doc.id}, '${escapeAttr(doc.original_filename)}')" title="Delete">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                 </button>
             </div>
         </div>`;
@@ -1001,7 +1052,7 @@ function applyEditModeToCurrentView() {
         extractedText.removeAttribute('readonly');
         extractedText.focus();
         extractedText.style.borderColor = 'var(--primary)';
-        extractedText.style.boxShadow = '0 0 0 3px rgba(79, 70, 229, 0.1)';
+        extractedText.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.1)';
 
         document.querySelectorAll('.layout-block').forEach(b => b.removeAttribute('contenteditable'));
     }
@@ -1350,32 +1401,71 @@ const confirmDocName = document.getElementById('confirmDocName');
 const confirmCancel = document.getElementById('confirmCancel');
 const confirmDelete = document.getElementById('confirmDelete');
 
-function showConfirmDialog(filename) {
+function showConfirmDialog(title, message, isDanger = false) {
     return new Promise((resolve) => {
-        confirmDocName.textContent = filename;
-        confirmOverlay.classList.add('active');
+        const overlay = document.getElementById('confirmOverlay');
+        const titleEl = document.getElementById('confirmTitle');
+        const messageEl = document.getElementById('confirmMessage');
+        const warningEl = document.getElementById('confirmWarning');
+        const cancelBtn = document.getElementById('confirmCancel');
+        const confirmBtn = document.getElementById('confirmMainAction');
+        const iconEl = document.getElementById('confirmIcon');
+
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+
+        if (isDanger) {
+            warningEl.textContent = 'This action cannot be undone.';
+            warningEl.style.display = 'block';
+            confirmBtn.className = 'btn confirm-delete';
+            confirmBtn.textContent = 'Delete';
+            iconEl.innerHTML = `
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    <line x1="10" y1="11" x2="10" y2="17"></line>
+                    <line x1="14" y1="11" x2="14" y2="17"></line>
+                </svg>
+            `;
+        } else {
+            warningEl.style.display = 'none';
+            confirmBtn.className = 'btn btn-primary';
+            confirmBtn.textContent = 'Confirm';
+            iconEl.innerHTML = `
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+            `;
+        }
+
+        overlay.classList.add('active');
 
         function cleanup() {
-            confirmOverlay.classList.remove('active');
-            confirmCancel.removeEventListener('click', onCancel);
-            confirmDelete.removeEventListener('click', onConfirm);
+            overlay.classList.remove('active');
+            cancelBtn.removeEventListener('click', onCancel);
+            confirmBtn.removeEventListener('click', onConfirm);
         }
 
         function onCancel() { cleanup(); resolve(false); }
         function onConfirm() { cleanup(); resolve(true); }
 
-        confirmCancel.addEventListener('click', onCancel);
-        confirmDelete.addEventListener('click', onConfirm);
+        cancelBtn.addEventListener('click', onCancel);
+        confirmBtn.addEventListener('click', onConfirm);
     });
 }
 
 async function deleteDocument(docId, filename) {
-    const confirmed = await showConfirmDialog(filename);
+    const confirmed = await showConfirmDialog('Delete Document', `Are you sure you want to delete "${filename}"?`, true);
     if (!confirmed) return;
 
     try {
         const response = await fetch(`${API_BASE}/api/documents/${docId}`, { method: 'DELETE' });
-        if (!response.ok) throw new Error('Delete failed');
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.detail || 'Delete failed');
+        }
         showToast('Document deleted', 'info');
         if (currentDocId === docId) closeModal();
         if (currentFolderId) {
@@ -1388,6 +1478,26 @@ async function deleteDocument(docId, filename) {
     }
 }
 window.deleteDocument = deleteDocument;
+
+const deleteAllBtn = document.getElementById('deleteAllBtn');
+if (deleteAllBtn) {
+    deleteAllBtn.addEventListener('click', async () => {
+        const confirmed = await showConfirmDialog('Are you sure you want to delete ALL documents? This cannot be undone.', true);
+        if (!confirmed) return;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/documents/all`, { method: 'DELETE' });
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.detail || 'Failed to delete all');
+            }
+            showToast('All documents deleted', 'info');
+            loadDocuments();
+        } catch (err) {
+            showToast('Error: ' + err.message, 'error');
+        }
+    });
+}
 
 // ═══ Search & Filters ═══════════════════════════════════════════════════════
 const toggleFiltersBtn = document.getElementById('toggleFiltersBtn');
@@ -1748,11 +1858,12 @@ async function extractDocument(docId) {
     }
 }
 
+
+
+
 function renderExtractionResults(data) {
     extractionLoading.style.display = 'none';
     extractionResults.style.display = 'block';
-
-    const t = (key) => dictionary && dictionary[key] ? dictionary[key] : key;
 
     const docType = data.type || 'other';
     extractionTypeBadge.textContent = t(docType.toUpperCase()) || docType.toUpperCase();
@@ -1847,7 +1958,8 @@ async function saveExtractionData(originalData) {
 
 function exportData(docId, format) {
     const a = document.createElement('a');
-    a.href = `${API_BASE}/api/documents/${docId}/export?format=${format}`;
+    const token = localStorage.getItem('token');
+    a.href = `${API_BASE}/api/documents/${docId}/export?format=${format}&token=${encodeURIComponent(token)}`;
     a.download = '';
     document.body.appendChild(a);
     a.click();
@@ -2093,12 +2205,14 @@ function switchView(viewId) {
     const uploadSection = document.getElementById('uploadSection');
     const aiAssistantView = document.getElementById('aiAssistantView');
     const settingsView = document.getElementById('settingsView');
+    const superAdminView = document.getElementById('superAdminView');
 
     if (dashboardSection) dashboardSection.style.display = 'none';
     if (documentsSection) documentsSection.style.display = 'none';
     if (uploadSection) uploadSection.style.display = 'none';
     if (aiAssistantView) aiAssistantView.style.display = 'none';
     if (settingsView) settingsView.style.display = 'none';
+    if (superAdminView) superAdminView.style.display = 'none';
 
     // Update Sidebar Active State (for direct calls like switchView('navAllDocs'))
     const navItems = document.querySelectorAll('.sidebar-nav-item');
@@ -2129,6 +2243,11 @@ function switchView(viewId) {
         document.body.style.overflow = 'auto';
         if (settingsView) settingsView.style.display = 'block';
         loadSettingsPage();
+    } else if (viewId === 'navSuperAdmin') {
+        document.body.classList.remove('ai-view-active');
+        document.body.style.overflow = 'auto';
+        if (superAdminView) superAdminView.style.display = 'block';
+        if (typeof loadSuperAdminPage === 'function') loadSuperAdminPage();
     }
 }
 
@@ -2149,9 +2268,9 @@ function countUp(el, target, duration = 900) {
 
 function setDashGreeting() {
     const hour = new Date().getHours();
-    let greeting = 'Good evening';
-    if (hour >= 5 && hour < 12) greeting = 'Good morning';
-    else if (hour >= 12 && hour < 17) greeting = 'Good afternoon';
+    let greeting = t('Good evening');
+    if (hour >= 5 && hour < 12) greeting = t('Good morning');
+    else if (hour >= 12 && hour < 17) greeting = t('Good afternoon');
     const el = document.getElementById('dashGreeting');
     if (el) el.textContent = greeting + ' 👋';
     const dateEl = document.getElementById('dashDate');
@@ -2191,7 +2310,6 @@ async function updateDashboardStats() {
 
         // Recent documents (last 10, sorted by most recent)
         const recent = [...docs]
-            .filter(d => d.file_type !== 'folder')
             .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
             .slice(0, 10);
 
@@ -2203,10 +2321,10 @@ async function updateDashboardStats() {
 
         if (recent.length === 0) {
             recentEl.innerHTML = `<div class="dash-empty-state" style="padding: 40px 20px; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
-                <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); margin-bottom: 12px; filter: drop-shadow(0 0 10px rgba(79, 70, 229, 0.3));"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"></path></svg>
+                <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary); margin-bottom: 12px; filter: drop-shadow(0 0 10px rgba(59, 130, 246, 0.3));"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"></path></svg>
                 <h3 style="font-size: 1.1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 6px;">No documents yet</h3>
                 <p style="font-size: 0.9rem; color: var(--text-secondary); max-width: 300px; margin: 0 auto 16px; line-height: 1.4;">Start by uploading your first document to unlock AI insights</p>
-                <button class="btn btn-accent" style="font-size:.85rem; padding:8px 18px; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);" onclick="document.getElementById('navAllDocs').click()">Upload Document</button>
+                <button class="btn btn-accent" style="font-size:.85rem; padding:8px 18px; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);" onclick="document.getElementById('navAllDocs').click()">Upload Document</button>
             </div>`;
             return;
         }
@@ -2222,6 +2340,11 @@ async function updateDashboardStats() {
         };
 
         const typeIcon = (type) => {
+            if (type === 'folder') {
+                return `<div class="recent-item-icon" style="color:var(--text-secondary);border-color:var(--border);background:var(--bg-secondary);">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                </div>`;
+            }
             const colors = { pdf: '#EF4444', png: '#8B5CF6', jpg: '#F59E0B', jpeg: '#F59E0B' };
             const color = colors[type] || 'var(--text-muted)';
             return `<div class="recent-item-icon" style="color:${color};border-color:${color}22;background:${color}11;">
@@ -2230,7 +2353,7 @@ async function updateDashboardStats() {
         };
 
         recentEl.innerHTML = recent.map((doc, i) => `
-            <div class="dashboard-recent-item" onclick="openDocument(${doc.id})" style="animation-delay:${i * 40}ms">
+            <div class="dashboard-recent-item" onclick="${doc.file_type === 'folder' ? `openFolder(${doc.id}, '${escapeAttr(doc.original_filename)}')` : `openDocument(${doc.id})`}" style="animation-delay:${i * 40}ms">
                 ${typeIcon(doc.file_type)}
                 <div class="recent-item-info">
                     <span class="recent-item-name" title="${escapeAttr(doc.original_filename)}">${escapeHtml(doc.original_filename)}</span>
@@ -2418,7 +2541,7 @@ function appendChatRow(role, content, results = []) {
 function buildDocCards(results) {
     if (!results || results.length === 0) return '';
 
-    const cards = results.slice(0, 12).map(doc => {
+    const cards = results.map(doc => {
         const meta = doc.extracted_metadata || {};
         const getVal = (k) => {
             const v = meta[k];
@@ -2452,27 +2575,27 @@ function buildDocCards(results) {
         <div class="result-docs-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
             <div class="result-docs-label" style="margin-bottom: 0;">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                ${results.length} Matched Document${results.length !== 1 ? 's' : ''}
+                ${results.length} ${results.length === 1 ? t('Matched Document') : t('Matched Documents')}
             </div>
             
             <div class="ai-export-wrapper" style="position: relative;">
                 <button class="btn-ai-export" onclick="toggleAiExportMenu('${sectionId}', event)">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    <span>Export Results</span>
+                    <span>${t('Export Results')}</span>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
                 </button>
                 <div id="${sectionId}" class="ai-export-menu">
                     <button class="ai-export-item" onclick="exportAIViaId('${docIds}', 'csv')">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="9" x2="9" y2="21"></line><line x1="15" y1="9" x2="15" y2="21"></line></svg>
-                        Export as CSV
+                        ${t('Export as CSV')}
                     </button>
                     <button class="ai-export-item" onclick="exportAIViaId('${docIds}', 'excel')">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M9.5 11.5l5 5"></path><path d="M14.5 11.5l-5 5"></path></svg>
-                        Export as Excel
+                        ${t('Export as Excel')}
                     </button>
                     <button class="ai-export-item" onclick="exportAIViaId('${docIds}', 'txt')">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                        Export as Text
+                        ${t('Export as Text')}
                     </button>
                 </div>
             </div>
@@ -2569,6 +2692,17 @@ let _settingsInitialized = false;
 
 function loadSettingsPage() {
     const s = getSettings();
+
+    // Team Management Visibility
+    const teamCard = document.getElementById('teamSettingsCard');
+    if (teamCard) {
+        if (currentUser && currentUser.role !== 'member') {
+            teamCard.style.display = 'block';
+            loadTeamTable();
+        } else {
+            teamCard.style.display = 'none';
+        }
+    }
 
     // API Key — load from SERVER (not localStorage)
     const apiInput = document.getElementById('settingApiKey');
@@ -2853,8 +2987,9 @@ function loadSettingsPage() {
         // Delete All Docs
         const delBtn = document.getElementById('clearAllDocsBtn');
         if (delBtn) {
-            delBtn.onclick = async () => {
-                if (!confirm('Delete ALL documents? This cannot be undone!')) return;
+            delBtn.onclick = async function clearAllDocsBtn() {
+                const confirmed = await showConfirmDialog('Delete All', 'Delete ALL documents? This cannot be undone!', true);
+                if (!confirmed) return;
                 try {
                     const res = await fetch(`${API_BASE}/api/documents/all`, { method: 'DELETE' });
                     if (res.ok) { showToast('All documents deleted', 'info'); await loadDocuments(); loadStorageInfo(); }
@@ -2983,3 +3118,271 @@ async function saveSettings() {
         showToast('Local settings saved', 'success');
     }
 }
+
+// ═══ Team Management (Organization Admin) ══════════════════════════════════
+async function loadTeamTable() {
+    if (!currentUser || currentUser.role === 'member') return;
+
+    const tbody = document.getElementById('teamTableBody');
+    const table = document.getElementById('teamTable');
+    const loadingState = document.getElementById('teamLoadingState');
+    if (!tbody || !table || !loadingState) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/org/team`);
+        if (!res.ok) throw new Error();
+        const users = await res.json();
+
+        loadingState.style.display = 'none';
+        table.style.display = 'table';
+        tbody.innerHTML = '';
+
+        users.forEach(u => {
+            const isSelf = u.id === currentUser.id;
+            const isMember = u.role === 'member';
+
+            let actionsHtml = '';
+            if (!isSelf) {
+                if (isMember && currentUser.role !== 'member') {
+                    actionsHtml += `<button class="admin-action-btn" onclick="promoteTeamMember(${u.id})" style="margin-right: 6px;">Promote to Admin</button>`;
+                } else if (u.role === 'admin' && currentUser.role === 'super_admin') {
+                    // Organization admins shouldn't be able to demote other admins easily unless required, but we will allow it.
+                    actionsHtml += `<button class="admin-action-btn" onclick="demoteTeamMember(${u.id})" style="margin-right: 6px;">Demote to Member</button>`;
+                } else if (u.role === 'admin' && currentUser.role === 'admin') {
+                    // Admiins can demote other admins within their org
+                    actionsHtml += `<button class="admin-action-btn" onclick="demoteTeamMember(${u.id})" style="margin-right: 6px;">Demote</button>`;
+                }
+                actionsHtml += `<button class="admin-action-btn danger" onclick="deleteTeamMember(${u.id})">Remove</button>`;
+            }
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td style="padding: 12px 16px;">
+                    <div style="font-weight: 500;">${escapeHtml(u.name)} ${isSelf ? '<span style="color:var(--text-muted);font-size:0.8rem">(You)</span>' : ''}</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(u.email)}</div>
+                </td>
+                <td style="padding: 12px 16px;">
+                    <span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.75rem; font-weight:600; background: ${u.role === 'admin' ? 'rgba(59, 130, 246, 0.1)' : 'var(--bg-secondary)'}; color: ${u.role === 'admin' ? 'var(--primary)' : 'var(--text-secondary)'};">
+                        ${u.role.toUpperCase()}
+                    </span>
+                </td>
+                <td style="padding: 12px 16px; font-size: 0.85rem; color: var(--text-muted);">${formatDate(u.created_at)}</td>
+                <td style="padding: 12px 16px; text-align: right;">${actionsHtml}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error(e);
+        loadingState.textContent = 'Failed to load team members.';
+    }
+}
+
+async function promoteTeamMember(userId) {
+    const confirmed = await showConfirmDialog('Promote User', 'Promote this user to Admin?');
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/org/team/${userId}/role`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role: 'admin' })
+        });
+        if (res.ok) { showToast('User promoted successfully', 'success'); loadTeamTable(); }
+        else showToast('Failed to promote user', 'error');
+    } catch { showToast('Error communicating with server', 'error'); }
+}
+
+async function demoteTeamMember(userId) {
+    const confirmed = await showConfirmDialog('Demote User', 'Demote this Admin to Member?');
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/org/team/${userId}/role`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role: 'member' })
+        });
+        if (res.ok) { showToast('User demoted successfully', 'success'); loadTeamTable(); }
+        else showToast('Failed to demote user', 'error');
+    } catch { showToast('Error communicating with server', 'error'); }
+}
+
+async function deleteTeamMember(userId) {
+    const confirmed = await showConfirmDialog('Remove User', 'Are you sure you want to remove this user from the organization? This will delete their account.', true);
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/org/team/${userId}`, { method: 'DELETE' });
+        if (res.ok) { showToast('User removed successfully', 'success'); loadTeamTable(); }
+        else showToast('Failed to remove user', 'error');
+    } catch { showToast('Error communicating with server', 'error'); }
+}
+
+function setupTeamHandlers() {
+    const addBtn = document.getElementById('addTeamMemberBtn');
+    const overlay = document.getElementById('addMemberOverlay');
+    const cancelBtn = document.getElementById('cancelAddMemberBtn');
+    const confirmBtn = document.getElementById('confirmAddMemberBtn');
+
+    if (addBtn && overlay) {
+        addBtn.onclick = () => overlay.classList.add('active');
+        cancelBtn.onclick = () => overlay.classList.remove('active');
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.classList.remove('active'); };
+
+        confirmBtn.onclick = async () => {
+            const name = document.getElementById('newMemberName').value;
+            const email = document.getElementById('newMemberEmail').value;
+            const password = document.getElementById('newMemberPassword').value;
+            const role = document.getElementById('newMemberRole').value;
+
+            if (!name || !email || !password) { showToast('Please fill all fields', 'error'); return; }
+
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = 'Adding...';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/org/team`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, email, password, role })
+                });
+
+                if (res.ok) {
+                    showToast('Team member added successfully', 'success');
+                    overlay.classList.remove('active');
+                    loadTeamTable();
+                } else {
+                    const data = await res.json();
+                    showToast(data.detail || 'Failed to add member', 'error');
+                }
+            } catch {
+                showToast('Network error', 'error');
+            } finally {
+                confirmBtn.disabled = false;
+                confirmBtn.textContent = 'Add Member';
+            }
+        };
+    }
+}
+
+// ═══ Super Admin Dashboard ═════════════════════════════════════════════════
+async function loadSuperAdminPage() {
+    if (!currentUser || currentUser.role !== 'super_admin') return;
+
+    try {
+        const [orgsRes, usersRes] = await Promise.all([
+            fetch(`${API_BASE}/api/admin/organizations`),
+            fetch(`${API_BASE}/api/admin/users`)
+        ]);
+
+        if (!orgsRes.ok || !usersRes.ok) throw new Error();
+
+        const orgs = await orgsRes.json();
+        const users = await usersRes.json();
+
+        document.getElementById('saTotalOrgs').textContent = orgs.length;
+        document.getElementById('saTotalUsers').textContent = users.length;
+
+        window.__saUsersList = users;
+
+        // Populate Orgs Table
+        const orgsBody = document.getElementById('saOrgsTableBody');
+        orgsBody.innerHTML = '';
+        orgs.forEach(o => {
+            const tr = document.createElement('tr');
+            tr.style.cursor = 'pointer';
+            tr.onclick = () => filterSaUsers(o.id, o.name);
+            tr.innerHTML = `
+                <td style="padding: 12px 16px; color: var(--text-muted); font-size: 0.8rem;">#${o.id}</td>
+                <td style="padding: 12px 16px; font-weight: 500;">${escapeHtml(o.name)}</td>
+                <td style="padding: 12px 16px;"><code>${escapeHtml(o.invite_code)}</code></td>
+                <td style="padding: 12px 16px;">${o.user_count || 0}</td>
+                <td style="padding: 12px 16px;">${o.doc_count || 0}</td>
+                <td style="padding: 12px 16px; font-size: 0.85rem; color: var(--text-muted);">${formatDate(o.created_at)}</td>
+            `;
+            orgsBody.appendChild(tr);
+        });
+
+        // Populate Users Table initially with all
+        renderSaUsersTable(users);
+
+    } catch (e) {
+        console.error('Super Admin fetch error', e);
+        showToast('Error loading admin dashboard', 'error');
+    }
+}
+
+function renderSaUsersTable(users) {
+    const usersBody = document.getElementById('saUsersTableBody');
+    usersBody.innerHTML = '';
+    users.forEach(u => {
+        const isSelf = u.id === currentUser.id;
+
+        let actionsHtml = '';
+        if (!isSelf) {
+            if (u.role === 'super_admin') {
+                actionsHtml += `<button class="admin-action-btn" onclick="demoteSaUser(${u.id}, 'admin')">Demote to Admin</button>`;
+            } else if (u.role === 'admin') {
+                actionsHtml += `<button class="admin-action-btn" onclick="promoteSaUser(${u.id}, 'super_admin')" style="margin-right: 6px;">Make Super Admin</button>`;
+                actionsHtml += `<button class="admin-action-btn" onclick="demoteSaUser(${u.id}, 'member')">Demote to Member</button>`;
+            } else {
+                actionsHtml += `<button class="admin-action-btn" onclick="promoteSaUser(${u.id}, 'admin')" style="margin-right: 6px;">Make Admin</button>`;
+            }
+            actionsHtml += `<button class="admin-action-btn danger" onclick="deleteSaUser(${u.id})" style="margin-left: 6px;">Delete</button>`;
+        }
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td style="padding: 12px 16px; font-weight: 500;">${escapeHtml(u.name)} ${isSelf ? '<span style="color:var(--text-muted);font-size:0.8rem">(You)</span>' : ''}</td>
+            <td style="padding: 12px 16px; color: var(--text-muted);">${escapeHtml(u.email)}</td>
+            <td style="padding: 12px 16px;">
+                <span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.75rem; font-weight:600; background: ${u.role === 'super_admin' ? 'rgba(212, 175, 55, 0.1)' : u.role === 'admin' ? 'rgba(59, 130, 246, 0.1)' : 'var(--bg-secondary)'}; color: ${u.role === 'super_admin' ? '#D4AF37' : u.role === 'admin' ? 'var(--primary)' : 'var(--text-secondary)'};">
+                    ${u.role.replace('_', ' ').toUpperCase()}
+                </span>
+            </td>
+            <td style="padding: 12px 16px; color: var(--text-muted);">${u.organization ? escapeHtml(u.organization.name) : '-'}</td>
+            <td style="padding: 12px 16px; text-align: right;">${actionsHtml}</td>
+        `;
+        usersBody.appendChild(tr);
+    });
+}
+
+function filterSaUsers(orgId, orgName) {
+    if (!window.__saUsersList) return;
+    const filtered = window.__saUsersList.filter(u => u.organization && u.organization.id === orgId);
+    document.getElementById('systemUsersTitle').textContent = `Users in Org: ${escapeHtml(orgName)}`;
+    document.getElementById('clearUserFilterBtn').style.display = 'inline-block';
+    renderSaUsersTable(filtered);
+}
+
+window.clearUserFilter = function () {
+    if (!window.__saUsersList) return;
+    document.getElementById('systemUsersTitle').textContent = 'System Users';
+    document.getElementById('clearUserFilterBtn').style.display = 'none';
+    renderSaUsersTable(window.__saUsersList);
+}
+
+
+async function promoteSaUser(userId, newRole) {
+    const confirmed = await showConfirmDialog('Change Role', "Change this user's role to " + newRole + "?");
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/admin/user/${userId}/role`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: newRole })
+        });
+        if (res.ok) { showToast('User role updated', 'success'); loadSuperAdminPage(); }
+        else showToast('Failed to update role', 'error');
+    } catch { showToast('Network Error', 'error'); }
+}
+
+async function demoteSaUser(userId, newRole) {
+    return promoteSaUser(userId, newRole);
+}
+
+async function deleteSaUser(userId) {
+    const confirmed = await showConfirmDialog('Delete User', 'WARNING: Permanently delete this user? This cannot be undone.', true);
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/admin/user/${userId}`, { method: 'DELETE' });
+        if (res.ok) { showToast('User deleted', 'success'); loadSuperAdminPage(); }
+        else showToast('Failed to delete user', 'error');
+    } catch { showToast('Network Error', 'error'); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(setupTeamHandlers, 1000); // Initialize handlers after UI loads
+});

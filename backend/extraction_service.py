@@ -10,7 +10,7 @@ import json
 import logging
 import requests
 
-from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
+from backend.config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
 
 logger = logging.getLogger(__name__)
 
@@ -64,26 +64,33 @@ Fields to extract:
 4. invoice_number (the ID/number of the invoice. Exclude words like 'Data'. Look for Nr, Br, #, Inv)
 5. total_amount (the FINAL true total to be paid. Ignore Subtotals like 'Nëntotali' or 'Subtotal')
 6. currency (e.g., EUR, USD, ALL, GBP, etc.)
-7. due_date (when the payment is expected or expiry date)
-8. expiry_date (if the document is a contract/report)
+7. due_date (when the payment is expected or expiry date. Format: YYYY-MM-DD)
+8. expiry_date (if the document is a contract/report. Format: YYYY-MM-DD)
 9. client_name (the person/company being billed. Often follows 'Bill To', 'Fatura Për', 'To:', 'Konsumatori')
+
 CRITICAL INSTRUCTIONS:
 - You must reply ONLY with a valid pure JSON format.
 - Do not add any conversational text, greetings, code blocks, or markdown formatting (```). Just the {{ and }} directly.
 - Each field must be a nested object with "value" (string or null) and "confidence" (number 0-100 indicating your certainty).
 - For 'document_type', provide the same nested object.
 - Make "type" a top-level string (same as document_type.value) for database sorting.
+- DATE EXTRACTION RULES:
+  - NEVER change or assume the year! You MUST extract the date literally as it appears in the text.
+  - If the document says 2026, your output MUST be 2026. Do NOT default to 2024 or the current year.
+  - Correctly handle the Albanian/European date format DD.MM.YYYY. Convert it accurately to YYYY-MM-DD (e.g., '02.02.2026' -> '2026-02-02').
+  - Use ISO format (YYYY-MM-DD) for all date fields (date, due_date, expiry_date).
+
 
 EXPECTED EXACT JSON STRUCTURE:
 {{
   "type": "invoice",
   "document_type": {{"value": "invoice", "confidence": 99}},
   "company": {{"value": "XYZ LLC", "confidence": 95}},
-  "date": {{"value": "12/04/2024", "confidence": 90}},
+  "date": {{"value": "2024-04-12", "confidence": 90}},
   "invoice_number": {{"value": "INV-123", "confidence": 90}},
   "total_amount": {{"value": "136200", "confidence": 95}},
   "currency": {{"value": "ALL", "confidence": 100}},
-  "due_date": {{"value": null, "confidence": 0}},
+  "due_date": {{"value": "2024-05-12", "confidence": 90}},
   "expiry_date": {{"value": null, "confidence": 0}},
   "client_name": {{"value": "John Doe", "confidence": 85}}
 }}
@@ -119,8 +126,21 @@ OCR Text to Process:
         )
         
         if response.status_code == 200:
-            result = response.json()
-            raw_content = result["choices"][0]["message"]["content"]
+            try:
+                result = response.json()
+            except Exception as parse_err:
+                logger.error(f"Failed to parse API response: {parse_err}")
+                return make_empty_metadata()
+
+            # Guard against unexpected response format (list, missing keys, etc.)
+            if not isinstance(result, dict) or not result.get("choices"):
+                logger.error(f"Unexpected API response: {str(result)[:200]}")
+                return make_empty_metadata()
+
+            raw_content = result["choices"][0].get("message", {}).get("content", "")
+            if not raw_content:
+                logger.error("Empty content in API response")
+                return make_empty_metadata()
             cleaned_json = clean_json_response(raw_content)
             
             try:

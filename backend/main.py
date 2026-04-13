@@ -30,15 +30,16 @@ import string
 import random
 
 # ── Secure Configuration ─────────────────────────────────────────────────────
-import config  # noqa: E402 — loads .env automatically
-from database import engine, get_db, Base
-from models import Document, User, Organization
-from auth import get_current_user, create_access_token, verify_password, get_password_hash
-from ocr_service import process_document, process_document_with_layout
-from extraction_service import extract_document_data
-from search_service import parse_search_query
-from assistant_service import get_assistant_response
-from security import (
+from backend import config  # صحيح 👍
+
+from backend.database import engine, get_db, Base
+from backend.models import Document, User, Organization
+from backend.auth import get_current_user, create_access_token, verify_password, get_password_hash
+from backend.ocr_service import process_document, process_document_with_layout
+from backend.extraction_service import extract_document_data
+from backend.search_service import parse_search_query
+from backend.assistant_service import get_assistant_response
+from backend.security import (
     SecurityHeadersMiddleware,
     validate_file_magic,
     sanitize_filename,
@@ -105,6 +106,10 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "f
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
+
+from admin_routes import admin_router, org_router
+app.include_router(admin_router)
+app.include_router(org_router)
 
 @app.get("/", include_in_schema=False)
 async def root():
@@ -227,8 +232,8 @@ def update_settings(payload: SettingsUpdate, current_user: User = Depends(get_cu
     from config import update_env_value, mask_api_key
     import config as cfg
 
-    # Only admins can change server settings
-    if current_user.role != "admin":
+    # Only admins or super_admins can change server settings
+    if current_user.role not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only admins can change settings")
 
     updated = []
@@ -420,25 +425,43 @@ def search_documents(payload: SearchQuery, db: Session = Depends(get_db), curren
                     if not date_val:
                         match = False
                     else:
-                        parsed_date = None
+                        parsed_iso = None
                         try:
-                            # Handle DD/MM/YYYY or MM/DD/YYYY to YYYY-MM
-                            parts = str(date_val).replace('-', '/').replace('.', '/').split('/')
-                            if len(parts) >= 2:
-                                if len(parts[-1]) == 4:
-                                    dt = datetime(int(parts[-1]), int(parts[-2]), int(parts[0]) if len(parts)==3 else 1)
-                                elif len(parts[0]) == 4:
-                                    dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts)==3 else 1)
+                            clean_v = str(date_val).replace('.', '-').replace('/', '-').strip()
+                            parts = [p.strip() for p in clean_v.split('-') if p.strip()]
+                            
+                            if len(parts) == 3:
+                                y, m, d = None, None, None
+                                p0, p1, p2 = int(parts[0]), int(parts[1]), int(parts[2])
+                                
+                                # 1. Find the year
+                                if p0 > 1000: y, m, d = p0, p1, p2
+                                elif p2 > 31: 
+                                    y = p2
+                                    if y < 100: y += 2000
+                                    # Now determine m vs d from p0, p1
+                                    if p1 > 12: d, m = p1, p0
+                                    elif p0 > 12: d, m = p0, p1
+                                    else: d, m = p0, p1 # Europe default: DD-MM
+                                # 2-digit year fallback or DD-MM-YYYY
+                                elif p2 > 12:
+                                    y = p2 + 2000 if p2 < 100 else p2
+                                    d, m = p0, p1
                                 else:
-                                    dt = datetime.now()
-                                parsed_date = dt.strftime("%Y-%m")
+                                    # Fallback to Europe: DD-MM-YYYY
+                                    d, m, y = p0, p1, p2
+                                    if y < 100: y += 2000
+                                
+                                if y and m and d:
+                                    dt = datetime(y, m, d)
+                                    parsed_iso = dt.strftime("%Y-%m-%d")
                         except Exception:
                             pass
                         
-                        if parsed_date:
-                            if d_from and parsed_date < d_from:
+                        if parsed_iso:
+                            if d_from and parsed_iso < d_from:
                                 match = False
-                            if d_to and parsed_date > d_to:
+                            if d_to and parsed_iso > d_to:
                                 match = False
                         else:
                             match = False
@@ -640,8 +663,9 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
 @app.delete("/api/documents/all")
 def delete_all_documents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Delete ALL documents and their files from disk."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can delete documents")
+    # Allow everyone in the organization to delete (admin, super_admin, member)
+    if current_user.role not in ("admin", "super_admin", "member"):
+        raise HTTPException(status_code=403, detail="Unrecognized user role")
     try:
         root_docs = db.query(Document).filter(Document.parent_id == None, Document.organization_id == current_user.organization_id).all()
         deleted_files = 0
@@ -664,24 +688,36 @@ def delete_all_documents(db: Session = Depends(get_db), current_user: User = Dep
 
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can delete documents")
+    # Allow everyone in the organization to delete (admin, super_admin, member)
+    if current_user.role not in ("admin", "super_admin", "member"):
+        raise HTTPException(status_code=403, detail="Unrecognized user role")
     doc = db.query(Document).filter(Document.id == doc_id, Document.organization_id == current_user.organization_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    if doc.file_type == "folder":
-        db.query(Document).filter(Document.parent_id == doc_id, Document.organization_id == current_user.organization_id).delete()
+    try:
+        # Delete children if this is a parent document (or folder)
+        if doc.parent_id is None:
+            db.query(Document).filter(Document.parent_id == doc_id, Document.organization_id == current_user.organization_id).delete()
 
-    if doc.parent_id is None:
-        file_path = os.path.join(UPLOAD_DIR, doc.filename)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # Delete physical file for root documents
+        if doc.parent_id is None and doc.file_type != "folder":
+            file_path = os.path.join(UPLOAD_DIR, doc.filename)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logger.error(f"File deletion error: {e}")
+                    # We continue even if file deletion fails to clean up DB
 
-    db.delete(doc)
-    db.commit()
-
-    return {"message": "Document deleted successfully", "id": doc_id}
+        db.delete(doc)
+        db.commit()
+        return {"message": "Document deleted successfully", "id": doc_id}
+    except Exception as e:
+        db.rollback()
+        error_msg = str(e)
+        logger.error(f"Full deletion error: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Database error: {error_msg}")
 
 
 @app.get("/api/documents/{doc_id}/layout")
@@ -778,10 +814,15 @@ def extract_document(doc_id: int, db: Session = Depends(get_db), current_user: U
     try:
         pages = json.loads(doc.ocr_layout_data or "[]")
         if pages:
-            layout_blocks = []
-            for page in pages:
-                layout_blocks.extend(page.get("blocks", []))
-    except (json.JSONDecodeError, TypeError):
+            # ✅ FIX: handle single-page dict stored instead of list
+            if isinstance(pages, dict):
+                pages = [pages]
+            if isinstance(pages, list):
+                layout_blocks = []
+                for page in pages:
+                    if isinstance(page, dict):  # skip string keys if any corruption
+                        layout_blocks.extend(page.get("blocks", []))
+    except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
         pass
 
     try:
@@ -809,7 +850,7 @@ def get_extraction(doc_id: int, db: Session = Depends(get_db), current_user: Use
     except (json.JSONDecodeError, TypeError):
         meta = {}
 
-    return {"doc_id": doc_id, "doc_type": doc.doc_type or "unknown", **meta}
+    return {"doc_id": doc_id, "type": doc.doc_type or "unknown", **meta}
 
 
 class ExtractUpdate(BaseModel):
@@ -823,7 +864,7 @@ def update_extraction(doc_id: int, payload: ExtractUpdate, db: Session = Depends
 
     doc.extracted_metadata = json.dumps(payload.metadata, ensure_ascii=False)
     db.commit()
-    return {"doc_id": doc_id, "doc_type": doc.doc_type or "unknown", **payload.metadata}
+    return {"doc_id": doc_id, "type": doc.doc_type or "unknown", **payload.metadata}
 
 
 @app.get("/api/documents/{doc_id}/export")

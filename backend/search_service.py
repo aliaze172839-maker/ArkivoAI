@@ -9,8 +9,7 @@ import logging
 import requests
 import datetime
 
-from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
-
+from backend.config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
 logger = logging.getLogger(__name__)
 
 

@@ -1,0 +1,16 @@
+38: let currentUser = null;
+44: currentUser = await res.json();
+45: document.body.setAttribute('data-role', currentUser.role);
+52: if (avatarBtn) avatarBtn.textContent = currentUser.name.charAt(0).toUpperCase();
+53: if (dropName) dropName.textContent = currentUser.name;
+54: if (dropEmail) dropEmail.textContent = currentUser.email;
+55: if (dropOrg) dropOrg.textContent = currentUser.organization.name + (currentUser.role === 'admin' ? ' (Admin)' : '');
+59: if (currentUser.role === 'admin' && currentUser.organization && currentUser.organization.invite_code) {
+62: if (dropInviteCode) dropInviteCode.textContent = currentUser.organization.invite_code;
+3049: if (!currentUser || currentUser.role === 'member') return;
+3066: const isSelf = u.id === currentUser.id;
+3071: if (isMember && currentUser.role !== 'member') {
+3073: } else if (u.role === 'admin' && currentUser.role === 'super_admin') {
+3076: } else if (u.role === 'admin' && currentUser.role === 'admin') {
+3189: if (!currentUser || currentUser.role !== 'super_admin') return;
+3238: const isSelf = u.id === currentUser.id;

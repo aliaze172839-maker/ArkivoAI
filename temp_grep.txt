@@ -1,0 +1,8 @@
+1371: function showConfirmDialog(filename) {
+1391: const confirmed = await showConfirmDialog(filename);
+2880: if (!confirm('Delete ALL documents? This cannot be undone!')) return;
+3069: if (!confirm('Promote this user to Admin?')) return;
+3081: if (!confirm('Demote this Admin to Member?')) return;
+3093: if (!confirm('Are you sure you want to remove this user from the organization? This will delete their account.')) return;
+3246: if (!confirm("Change this user's role to " + newRole + "?")) return;
+3261: if (!confirm('WARNING: Permanently delete this user? This cannot be undone.')) return;

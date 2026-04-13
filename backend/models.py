@@ -72,7 +72,7 @@ class Document(Base):
             "status": self.status,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "doc_type": self.doc_type or "unknown",
+            "type": self.doc_type or "unknown",
             "extracted_metadata": meta,
             "organization_id": self.organization_id,
         }

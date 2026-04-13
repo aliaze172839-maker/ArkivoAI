@@ -2,8 +2,7 @@
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from config import DATABASE_URL
-
+from backend.config import DATABASE_URL
 # Support both SQLite and PostgreSQL
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
