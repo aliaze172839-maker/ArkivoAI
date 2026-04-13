@@ -18,21 +18,22 @@ import io
 import logging
 from pathlib import Path
 from datetime import datetime
-
+from contextlib import asynccontextmanager
 from typing import Dict, Any, List
+import string
+import random
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
-import string
-import random
 
 # ── Secure Configuration ─────────────────────────────────────────────────────
-from backend import config  # صحيح 👍
+from backend import config
 
-from backend.database import engine, get_db, Base
+from backend.database import engine, get_db, Base, SessionLocal
 from backend.models import Document, User, Organization
 from backend.auth import get_current_user, create_access_token, verify_password, get_password_hash
 from backend.ocr_service import process_document, process_document_with_layout
@@ -46,58 +47,117 @@ from backend.security import (
     validate_password_strength,
     validate_name,
 )
-from backend.database import engine, get_db, Base, SessionLocal  # ✅ أضف SessionLocal
-from backend.database import SessionLocal
-import os
 from backend.admin_routes import admin_router, org_router
-app.include_router(org_router)       # ✅ هذا مضاف
-# ❌ admin_router غير مضاف! أضفه:
-app.include_router(admin_router)
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ── Super Admin Setup ─────────────────────────────────────────────────────────
 def create_super_admin():
     db = SessionLocal()
+    try:
+        # Create or get organization
+        org = db.query(Organization).filter(Organization.name == "Arkivo Core").first()
+        if not org:
+            org = Organization(name="Arkivo Core", invite_code="ARKIVO-CORE")
+            db.add(org)
+            db.commit()
+            db.refresh(org)
 
-    # Create or get organization
-    org = db.query(Organization).filter(Organization.name == "Arkivo Core").first()
-    if not org:
-        org = Organization(name="Arkivo Core", invite_code="ARKIVO-CORE")
-        db.add(org)
-        db.commit()
-        db.refresh(org)
+        admin_password = os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")
 
-    # ✅ استخدم ENV مرة واحدة
-    admin_password = os.getenv("ADMIN_PASSWORD", "Arkivo_Admin_2026")
+        # Create or update super admin
+        user = db.query(User).filter(User.email == "adminA@arkivo.com").first()
+        if not user:
+            user = User(
+                name="adminA",
+                email="adminA@arkivo.com",
+                hashed_password=get_password_hash(admin_password),
+                role="super_admin",
+                organization_id=org.id
+            )
+            db.add(user)
+            db.commit()
+            print("✅ Super Admin created")
+        else:
+            user.role = "super_admin"
+            user.hashed_password = get_password_hash(admin_password)
+            db.commit()
+            print("♻️ Super Admin updated")
+    finally:
+        db.close()
 
-    # Create or update super admin
-    user = db.query(User).filter(User.email == "adminA@arkivo.com").first()
-    if not user:
-        user = User(
-            name="adminA",
-            email="adminA@arkivo.com",
-            hashed_password=get_password_hash(admin_password),
-            role="super_admin",
-            organization_id=org.id
-        )
-        db.add(user)
-        db.commit()
-        print("✅ Super Admin created")
-    else:
-        user.role = "super_admin"
-        user.hashed_password = get_password_hash(admin_password)
-        db.commit()
-        print("♻️ Super Admin updated")
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🔥 STARTUP WORKING")
+    Base.metadata.create_all(bind=engine)
+    create_super_admin()
+    yield
 
-    db.close()
-
-from contextlib import asynccontextmanager
-
-# ✅ تعريف واحد صحيح
+# ── ✅ App — تعريف واحد فقط مع lifespan ──────────────────────────────────────
 app = FastAPI(
     title="Arkivo — AI Document Management System",
     version="2.0.0",
-    lifespan=lifespan,  # ← هذا هو المهم
+    lifespan=lifespan,
     docs_url=None if os.environ.get("PRODUCTION") else "/docs",
     redoc_url=None if os.environ.get("PRODUCTION") else "/redoc",
 )
+
+# ── Config ────────────────────────────────────────────────────────────────────
+UPLOAD_DIR = config.UPLOAD_DIR
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+ALLOWED_EXTENSIONS = config.ALLOWED_EXTENSIONS
+MAX_FILE_SIZE = config.MAX_FILE_SIZE
+
+# ── Security Middleware ───────────────────────────────────────────────────────
+app.add_middleware(SecurityHeadersMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+
+    limiter = Limiter(key_func=get_remote_address)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    RATE_LIMITING_ENABLED = True
+    logger.info("Rate limiting enabled.")
+except ImportError:
+    RATE_LIMITING_ENABLED = False
+    logger.warning("slowapi not installed — rate limiting disabled.")
+
+    class _NoOpLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    limiter = _NoOpLimiter()
+
+# ── Static Files ──────────────────────────────────────────────────────────────
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
+if os.path.isdir(FRONTEND_DIR):
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+# ── ✅ Routers — بعد تعريف app مباشرة ────────────────────────────────────────
+app.include_router(org_router)
+app.include_router(admin_router)
+
+# ── Root Redirect ─────────────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/static/index.html")
+
 
 # -------------------------------------------
 logging.basicConfig(level=logging.INFO)
