@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════════════
 #  PaddleOCR Engine (loaded once, reused)
 # ══════════════════════════════════════════════════════════════════════════════
+_ocr = None
 
+def get_ocr():
+    global _ocr
+    if _ocr is None:
+        _ocr = PaddleOCR(use_angle_cls=False, use_gpu=False, lang='latin', show_log=False)
+    return _ocr
 _engines = {}
 
 def _get_engine(lang: str = "latin"):
