@@ -650,12 +650,16 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
 
+    # ── Images ────────────────────────────────────────────────────────────────
     if doc.file_type in ("jpg", "jpeg", "png"):
         media_types = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
         return FileResponse(path=file_path, media_type=media_types.get(doc.file_type, "application/octet-stream"))
 
+    # ── PDF / Folder ──────────────────────────────────────────────────────────
     if doc.file_type in ("pdf", "folder"):
-        from pdf2image import convert_from_path
+        import fitz  # pymupdf — no poppler needed
+
+        # Child document: use page number from its stored layout data
         if doc.parent_id is not None:
             try:
                 layout = json.loads(doc.ocr_layout_data or "[]")
@@ -663,33 +667,33 @@ def preview_document(doc_id: int, page: int = 1, db: Session = Depends(get_db), 
                     page = layout[0].get("page", page)
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        # Folder type always shows page 1 of the source PDF
         if doc.file_type == "folder":
             page = 1
 
-        poppler_path = os.environ.get("POPPLER_PATH", None)
-        kwargs = {}
-        if poppler_path:
-            kwargs["poppler_path"] = poppler_path
-        else:
-            local_poppler = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "poppler", "poppler-24.07.0", "Library", "bin")
-            if os.path.isdir(local_poppler):
-                kwargs["poppler_path"] = local_poppler
+        try:
+            pdf_doc = fitz.open(file_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Cannot open PDF: {e}")
+
+        total_pages = len(pdf_doc)
+        if page < 1 or page > total_pages:
+            pdf_doc.close()
+            raise HTTPException(status_code=404, detail=f"Page {page} not found. Document has {total_pages} page(s).")
 
         try:
-            images = convert_from_path(file_path, dpi=150, first_page=page, last_page=page, **kwargs)
+            mat = fitz.Matrix(150 / 72, 150 / 72)  # 150 DPI
+            pix = pdf_doc[page - 1].get_pixmap(matrix=mat, alpha=False)
+            img_bytes = pix.tobytes("png")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to render PDF page: {e}")
+        finally:
+            pdf_doc.close()
 
-        if not images:
-            raise HTTPException(status_code=404, detail="Page not found")
-
-        buf = io.BytesIO()
-        images[0].save(buf, format="PNG")
-        buf.seek(0)
-        return Response(content=buf.read(), media_type="image/png")
+        return Response(content=img_bytes, media_type="image/png")
 
     raise HTTPException(status_code=400, detail="Unsupported file type for preview")
-
 
 @app.delete("/api/documents/all")
 def delete_all_documents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
