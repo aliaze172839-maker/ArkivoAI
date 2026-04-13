@@ -46,25 +46,7 @@ from backend.security import (
     validate_password_strength,
     validate_name,
 )
-def create_default_admin():
-    db = SessionLocal()
 
-    existing = db.query(User).filter(User.role == "super_admin").first()
-
-    if not existing:
-        user = User(
-            name="Admin",
-            email="aliboss@gmail.com",
-            hashed_password=get_password_hash("a1s2d3f4g"),
-            role="super_admin"
-        )
-        db.add(user)
-        db.commit()
-        print("✅ Super admin created")
-
-    db.close()
-
-create_default_admin()
 # ── Setup ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
