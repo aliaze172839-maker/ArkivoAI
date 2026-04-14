@@ -52,7 +52,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ── ✅ FIX-2: update_env_value مفقودة كلياً من الكود الأصلي ──────────────────
+# ── ✅ FIX-2: update_env_value مفقودة كلياً من الكود الأصلي ─────────────────
 def update_env_value(key: str, value: str):
     """Write/update a key=value line in .env and set it in os.environ."""
     env_path = Path(".env")
